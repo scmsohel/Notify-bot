@@ -873,6 +873,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/set_reminder` → রিমাইন্ডার সেট\n"
         "• `/show_reminder` → সক্রিয় রিমাইন্ডার দেখুন\n"
         "• `/show_completed` → সম্পন্ন রিমাইন্ডার তালিকা\n"
+        "• `/clear_completed` → সম্পন্ন রিমাইন্ডার ডিলেট\n"
         "• `/delete_reminder_<id>` → রিমাইন্ডার ডিলিট\n"
         "\n"
         "যেকোনো সময় সাহায্যের জন্য আবার `/help` ব্যবহার করুন।"
@@ -937,4 +938,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
