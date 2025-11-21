@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
 
-from aiohttp import web
+
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -881,8 +881,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown")
 
 # Simple aiohttp ping server (for healthchecks)
-async def handle_ping(request):
-    return web.Response(text="ok")
+
 
 # MAIN — webhook mode (with fallback)
 def main():
@@ -919,19 +918,6 @@ def main():
     reload_scheduled_jobs(application)
 
     # start a tiny ping server for healthcheck
-    async def start_ping():
-        app = web.Application()
-        app.router.add_get("/ping", handle_ping)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        print(f"Ping server running on http://0.0.0.0:{port}/ping")
-
-    try:
-        asyncio.get_event_loop().create_task(start_ping())
-    except Exception:
-        pass
 
     # If WEBHOOK_URL provided, try webhook; otherwise use polling.
     if WEBHOOK_URL:
@@ -951,3 +937,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
