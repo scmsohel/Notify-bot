@@ -14,7 +14,7 @@ import base64
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
-
+from aiohttp import web
 
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -919,7 +919,13 @@ def main():
     reload_scheduled_jobs(application)
 
     # start a tiny ping server for healthcheck
+    # --- Add /ping route for Google Script healthchecks ---
+    async def ping_route(request):
+        return web.Response(text="ok")
 
+    application.web_app.router.add_get("/ping", ping_route)
+    print("Ping endpoint added: /ping")
+    
     # If WEBHOOK_URL provided, try webhook; otherwise use polling.
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port} with path /{webhook_path} and url {webhook_url}")
@@ -938,5 +944,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
