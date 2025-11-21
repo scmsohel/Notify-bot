@@ -1111,33 +1111,42 @@ def reload_scheduled_jobs(app):
 def main():
     global GLOBAL_BOT
 
+    # --- Build Telegram App ---
     app = Application.builder().token(BOT_TOKEN).build()
     GLOBAL_BOT = app.bot
 
     loop = asyncio.get_event_loop()
 
-    # Render PORT
+    # --- Start ping server (Render PORT) ---
     port = int(os.getenv("PORT", "8000"))
     loop.create_task(run_ping_server(host="0.0.0.0", port=port))
 
-    # Load GitHub backup (if configured)
+    # --- Load backup from GitHub if configured ---
     if GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO:
-        loop.run_until_complete(load_backup_from_github())
+        try:
+            loop.run_until_complete(load_backup_from_github())
+        except Exception as e:
+            logging.error(f"Backup load error: {e}")
 
-    # Handlers
+    # --- Telegram Handlers ---
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set_reminder", set_reminder))
     app.add_handler(CommandHandler("show_reminder", show_reminder))
     app.add_handler(CommandHandler("show_completed", show_completed))
     app.add_handler(CommandHandler("clear_completed", clear_completed))
     app.add_handler(CommandHandler("notify_user", notify_user))
+
     app.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(CommandHandler("help", help_command))
 
-    # Reload jobs
+    # --- Reload saved jobs into APScheduler ---
     reload_scheduled_jobs(app)
 
     print("Reminder Bot Running...")
+
+    # --- Start Polling ---
     app.run_polling()
+
+
