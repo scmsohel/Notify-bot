@@ -803,6 +803,7 @@ def reload_scheduled_jobs(app=None):
             logging.error(f"Reload job error (rem_id={rem_id}): {e}")
 
 # MAIN — webhook mode (with polling fallback)
+# MAIN — webhook mode (with polling fallback)
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set in environment.")
@@ -814,11 +815,11 @@ def main():
 
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # set global bot for scheduler fallback
+    # GLOBAL bot
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # register handlers
+    # handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
@@ -826,12 +827,11 @@ def main():
     application.add_handler(CommandHandler("clear_completed", clear_completed))
     application.add_handler(CommandHandler("notify_user", notify_user))
     application.add_handler(CommandHandler("help", help_command))
-
     application.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # reload db jobs
+    # Reload jobs
     reload_scheduled_jobs(application)
 
     # WEBHOOK MODE
@@ -839,10 +839,12 @@ def main():
         print(f"Starting webhook on port {port} with path /{webhook_path}")
         print(f"Webhook URL = {webhook_url}")
 
-        # Add /ping route
+        # ⭐ Proper ping route binding
         try:
-            application.webhook_app.router.add_get("/ping", lambda r: web.Response(text="ok"))
-            print("[PING] /ping route added OK")
+            from aiohttp import web
+            app = application.web_app
+            app.router.add_get("/ping", lambda request: web.Response(text="ok"))
+            print("[PING] Added successfully → /ping")
         except Exception as e:
             print(f"[PING ERROR] {e}")
 
@@ -858,12 +860,14 @@ def main():
         except Exception as e:
             logging.error(f"run_webhook failed: {e} — falling back to polling")
 
-    # POLLING fallback
+    # POLLING MODE
     print("Starting polling (WEBHOOK skipped or failed).")
     application.run_polling()
 
 
+
 if __name__ == "__main__":
     main()
+
 
 
