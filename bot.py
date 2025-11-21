@@ -1108,23 +1108,25 @@ def reload_scheduled_jobs(app):
 
         except Exception as e:
             logging.error("Reload job error: %s", e)
-def main():
+# ============================
+# FIXED MAIN for Render + PTB v21
+# ============================
+
+async def main_async():
     global GLOBAL_BOT
 
     # --- Build Telegram App ---
     app = Application.builder().token(BOT_TOKEN).build()
     GLOBAL_BOT = app.bot
 
-    loop = asyncio.get_event_loop()
-
-    # --- Start ping server (Render PORT) ---
+    # --- Start ping server (Render port) ---
     port = int(os.getenv("PORT", "8000"))
-    loop.create_task(run_ping_server(host="0.0.0.0", port=port))
+    asyncio.create_task(run_ping_server(host="0.0.0.0", port=port))
 
-    # --- Load backup from GitHub if configured ---
+    # --- Load GitHub backup (if enabled) ---
     if GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO:
         try:
-            loop.run_until_complete(load_backup_from_github())
+            await load_backup_from_github()
         except Exception as e:
             logging.error(f"Backup load error: {e}")
 
@@ -1141,12 +1143,22 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
     app.add_handler(CommandHandler("help", help_command))
 
-    # --- Reload saved jobs into APScheduler ---
+    # --- Reload scheduled jobs ---
     reload_scheduled_jobs(app)
 
     print("Reminder Bot Running...")
 
-    # --- Start Polling ---
-    app.run_polling()
+    # --- Start Bot Polling (async) ---
+    await app.run_polling()
+
+
+def main():
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
+
+
 
 
