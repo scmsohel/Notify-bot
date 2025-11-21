@@ -1,4 +1,4 @@
-# bot.py — Webhook-ready Notify Bot (Render / any host)
+# bot.py — Webhook-ready Notify Bot (fixed datetime/daily behavior)
 # -------------------------------------------------------------------
 # Uses python-telegram-bot v21.6 (async), aiohttp for ping.
 # Webhook path is: /webhook/<BOT_TOKEN>
@@ -29,8 +29,14 @@ from telegram.ext import (
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+# timezone handling (no extra dependency required on modern Python)
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None  # best-effort; if not available, scheduler will use system tz
+
 # ===============================================================
-# Logging (only errors)
+# Logging (only errors + some useful debug for parsing issues)
 # ===============================================================
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -46,7 +52,7 @@ FORCED_CHANNEL = os.getenv("FORCED_CHANNEL")
 ADMIN_ID = int(os.getenv("ADMIN_ID") or 0)
 
 # Webhook host (public) — set this to your site (Render URL)
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://notify-bot-fos4.onrender.com")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 
 # Backup / GitHub (optional)
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -56,6 +62,18 @@ BACKUP_FILE = os.getenv("BACKUP_FILE", "backup.json")
 
 # DB path
 DB_PATH = os.getenv("DB_PATH", "bot.db")
+
+# TIMEZONE (default Asia/Dhaka). You can set TZ env to other IANA zone.
+TZ = os.getenv("TZ", "Asia/Dhaka")
+
+# derive tzinfo if possible
+_tzinfo = None
+if ZoneInfo:
+    try:
+        _tzinfo = ZoneInfo(TZ)
+    except Exception:
+        logging.error("Invalid TZ '%s', falling back to system timezone", TZ)
+        _tzinfo = None
 
 # ===============================================================
 # Admin helper
@@ -203,7 +221,7 @@ def get_user_reminders(uid):
     return cursor.fetchall()
 
 # ===============================================================
-# GITHUB BACKUP HELPERS (safe)
+# GITHUB BACKUP HELPERS (kept same as your version)
 # ===============================================================
 GITHUB_API_HEADERS = None
 if GITHUB_TOKEN:
@@ -355,7 +373,8 @@ async def save_backup_async():
 # ===========================
 # Scheduler + send_reminder
 # ===========================
-scheduler = AsyncIOScheduler()
+# Use timezone if available
+scheduler = AsyncIOScheduler(timezone=_tzinfo) if _tzinfo else AsyncIOScheduler()
 scheduler.start()
 
 GLOBAL_BOT = None
@@ -386,10 +405,12 @@ async def send_reminder(user_id, message, context=None, rem_id: int = None):
 # Forced Join Check & UI helpers
 # ===============================================================
 async def check_join_status(user_id, context):
+    if not FORCED_CHANNEL:
+        return True
     try:
         member = await context.bot.get_chat_member(FORCED_CHANNEL, user_id)
         return member.status in ["member", "administrator", "creator"]
-    except:
+    except Exception:
         return False
 
 async def send_force_join_message(update: Update, context):
@@ -400,7 +421,9 @@ async def send_force_join_message(update: Update, context):
             InlineKeyboardButton("✔ Verify", callback_data="verify_join")
         ]
     ]
-    msg = update.message or update.callback_query.message
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
+    if not msg:
+        return
     await msg.reply_text(
         t(user_id, "force_join_text"),
         reply_markup=InlineKeyboardMarkup(btn),
@@ -408,14 +431,15 @@ async def send_force_join_message(update: Update, context):
     )
 
 async def send_language_menu(update: Update, context):
-    msg = update.message or update.callback_query.message
+    msg = update.message or (update.callback_query.message if update.callback_query else None)
     btn = [
         [
             InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn"),
             InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
         ]
     ]
-    await msg.reply_text("🌐 Select your language:", reply_markup=InlineKeyboardMarkup(btn))
+    if msg:
+        await msg.reply_text("🌐 Select your language:", reply_markup=InlineKeyboardMarkup(btn))
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -522,7 +546,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("⚠️ Invalid state. Please set reminder again.")
         rem_id = save_reminder(target_id, msg, "min_hour", tval, 0)
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-        run_time = datetime.now() + timedelta(seconds=seconds)
+        run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds) if _tzinfo else datetime.now() + timedelta(seconds=seconds)
         job = scheduler.add_job(
             send_reminder,
             trigger="date",
@@ -555,7 +579,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 chat = await context.bot.get_chat(username)
                 target_id = chat.id
-            except:
+            except Exception:
                 return await update.message.reply_text("❌ User not found বা username ভুল।")
         else:
             if not raw.isdigit():
@@ -597,7 +621,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rem_id = save_reminder(target, msg, "min_hour", tval, repeat_count)
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
         for i in range(repeat_count):
-            run_time = datetime.now() + timedelta(seconds=seconds * (i + 1))
+            run_time = (datetime.now(tz=_tzinfo) + timedelta(seconds=seconds * (i + 1))) if _tzinfo else (datetime.now() + timedelta(seconds=seconds * (i + 1)))
             job = scheduler.add_job(
                 send_reminder,
                 trigger="date",
@@ -617,7 +641,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("mode") == "date_select":
         try:
             datetime.strptime(text, "%d/%m/%y")
-        except:
+        except Exception:
             return await update.message.reply_text("⚠️ তারিখ ফরম্যাট ভুল (15/11/25)")
         context.user_data["date"] = text
         context.user_data["mode"] = "date_time"
@@ -626,7 +650,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("mode") == "date_time":
         try:
             datetime.strptime(text, "%I.%M %p")
-        except:
+        except Exception:
             return await update.message.reply_text("⚠️ সময় ফরম্যাট ভুল (10.15 PM)")
         context.user_data["time"] = text
         context.user_data["mode"] = "date_message"
@@ -637,7 +661,13 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         date_str = context.user_data["date"]
         time_str = context.user_data["time"]
         target = context.user_data.get("notify_target", user_id)
-        dt = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%y %I.%M %p")
+        # build tz-aware datetime if tzinfo available
+        try:
+            dt_naive = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%y %I.%M %p")
+            dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
+        except Exception as e:
+            logging.error("Date parse failed: %s", e)
+            return await update.message.reply_text("⚠️ Date/time parse failed.")
         rem_id = save_reminder(target, msg, "date", f"{date_str} {time_str}", 0)
         job = scheduler.add_job(
             send_reminder,
@@ -659,7 +689,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("mode") == "daily_single_time":
         try:
             datetime.strptime(text, "%I.%M %p")
-        except:
+        except Exception:
             return await update.message.reply_text(t(user_id, "wrong_time_format"))
         context.user_data["daily_times"] = [text]
         context.user_data["mode"] = "daily_msg"
@@ -672,7 +702,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 datetime.strptime(line, "%I.%M %p")
                 valid.append(line)
-            except:
+            except Exception:
                 return await update.message.reply_text(t(user_id, "wrong_time_format"))
         context.user_data["daily_times"] = valid
         context.user_data["mode"] = "daily_msg"
@@ -684,16 +714,30 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = context.user_data.get("notify_target", user_id)
         rem_id = save_reminder(target, msg, "daily", ";".join(times), 0)
         for tstr in times:
-            dt_obj = datetime.strptime(tstr, "%I.%M %p")
-            hour, minute = dt_obj.hour, dt_obj.minute
-            job = scheduler.add_job(
-                send_reminder,
-                trigger="cron",
-                hour=hour,
-                minute=minute,
-                kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
-            )
-            add_job_map(rem_id, job.id)
+            try:
+                dt_obj = datetime.strptime(tstr, "%I.%M %p")
+                hour, minute = dt_obj.hour, dt_obj.minute
+                # schedule cron with timezone if available
+                if _tzinfo:
+                    job = scheduler.add_job(
+                        send_reminder,
+                        trigger="cron",
+                        hour=hour,
+                        minute=minute,
+                        timezone=_tzinfo,
+                        kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
+                    )
+                else:
+                    job = scheduler.add_job(
+                        send_reminder,
+                        trigger="cron",
+                        hour=hour,
+                        minute=minute,
+                        kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
+                    )
+                add_job_map(rem_id, job.id)
+            except Exception as e:
+                logging.error("Daily schedule error for %s: %s", tstr, e)
         context.user_data.clear()
         return await update.message.reply_text(
             f"✅ Daily Reminder Set!\n"
@@ -807,32 +851,50 @@ def reload_scheduled_jobs():
     for rem_id, uid, msg, stype, tval, rep in rows:
         try:
             if stype == "min_hour":
-                seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-                run_time = datetime.now() + timedelta(seconds=seconds)
+                # min_hour reminders are one-shot; when service restarts, rescheduling them
+                # would re-trigger full interval again. We will reschedule them (like before),
+                # but use tz-aware now.
+                try:
+                    seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
+                except Exception:
+                    logging.error("Invalid min_hour stored value: %s", tval)
+                    continue
+                run_time = (datetime.now(tz=_tzinfo) + timedelta(seconds=seconds)) if _tzinfo else (datetime.now() + timedelta(seconds=seconds))
                 job = scheduler.add_job(send_reminder, trigger="date", run_date=run_time,
                     kwargs={"user_id": uid, "message": msg, "rem_id": rem_id})
                 add_job_map(rem_id, job.id)
 
             elif stype == "date":
-                dt = datetime.strptime(tval, "%d/%m/%y %I.%M %p")
-                if dt > datetime.now():
-                    job = scheduler.add_job(send_reminder, trigger="date", run_date=dt,
-                        kwargs={"user_id": uid, "message": msg, "rem_id": rem_id})
-                    add_job_map(rem_id, job.id)
+                # parse stored date/time and attach tz if available
+                try:
+                    dt_naive = datetime.strptime(tval, "%d/%m/%y %I.%M %p")
+                    dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
+                    if dt > (datetime.now(tz=_tzinfo) if _tzinfo else datetime.now()):
+                        job = scheduler.add_job(send_reminder, trigger="date", run_date=dt,
+                            kwargs={"user_id": uid, "message": msg, "rem_id": rem_id})
+                        add_job_map(rem_id, job.id)
+                except Exception as e:
+                    logging.error("Reload DATE parse error for %s: %s", tval, e)
 
             elif stype == "daily":
                 times = tval.split(";")
                 for tstr in times:
-                    dt_obj = datetime.strptime(tstr, "%I.%M %p")
-                    hour, minute = dt_obj.hour, dt_obj.minute
-                    job = scheduler.add_job(send_reminder, trigger="cron", hour=hour, minute=minute,
-                        kwargs={"user_id": uid, "message": msg, "rem_id": None})
-                    add_job_map(rem_id, job.id)
-
+                    try:
+                        dt_obj = datetime.strptime(tstr, "%I.%M %p")
+                        hour, minute = dt_obj.hour, dt_obj.minute
+                        if _tzinfo:
+                            job = scheduler.add_job(send_reminder, trigger="cron", hour=hour, minute=minute, timezone=_tzinfo,
+                                kwargs={"user_id": uid, "message": msg, "rem_id": None})
+                        else:
+                            job = scheduler.add_job(send_reminder, trigger="cron", hour=hour, minute=minute,
+                                kwargs={"user_id": uid, "message": msg, "rem_id": None})
+                        add_job_map(rem_id, job.id)
+                    except Exception as e:
+                        logging.error("Reload DAILY parse error for %s: %s", tstr, e)
         except Exception as e:
-            logging.error(f"Reload job error: {e}")
+            logging.error(f"Reload job error (rem_id={rem_id}): {e}")
 
-# MAIN — webhook mode
+# MAIN — webhook mode (with fallback)
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set in environment.")
@@ -840,12 +902,12 @@ def main():
 
     port = int(os.getenv("PORT", "8000"))
     webhook_path = f"webhook/{BOT_TOKEN}"   # path on your server
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
+    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}" if WEBHOOK_URL else ""
 
     # build application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # set global bot for scheduler fallback
+    # set global bot for scheduler fallback (bot object available)
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
@@ -868,20 +930,41 @@ def main():
     # load backup from github (optional)
     if GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO:
         try:
-            # run as task while app starts
             asyncio.get_event_loop().create_task(load_backup_from_github())
         except Exception as e:
             logging.error(f"Backup load error: {e}")
 
-    # Also run a tiny ping server so Render healthcheck can use it (optional)
-    # The run_webhook will also serve webhook path; we start a small aiohttp app on same port using run_webhook.
-    print(f"Starting webhook on port {port} with path /{webhook_path}")
-    # run webhook server (this starts aiohttp and registers webhook with Telegram)
-    # NOTE: run_webhook blocks until stopped
-    application.run_webhook(listen="0.0.0.0",
-                            port=port,
-                            url_path=webhook_path,
-                            webhook_url=webhook_url)
+    # Also run a tiny ping server for healthcheck (aiohttp)
+    async def start_ping():
+        app = web.Application()
+        app.router.add_get("/ping", handle_ping)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        print(f"Ping server running on http://0.0.0.0:{port}/ping")
+
+    # start ping server as background task
+    try:
+        asyncio.get_event_loop().create_task(start_ping())
+    except Exception:
+        pass
+
+    # If WEBHOOK_URL provided, try webhook; otherwise use polling.
+    if WEBHOOK_URL:
+        print(f"Starting webhook on port {port} with path /{webhook_path} and url {webhook_url}")
+        try:
+            application.run_webhook(listen="0.0.0.0",
+                                    port=port,
+                                    url_path=webhook_path,
+                                    webhook_url=webhook_url)
+            return
+        except Exception as e:
+            # fallback to polling if webhook cannot start (e.g. missing extras)
+            logging.error("run_webhook failed: %s — falling back to polling", e)
+
+    print("Starting polling (WEBHOOK skipped or failed).")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
