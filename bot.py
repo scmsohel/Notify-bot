@@ -11,6 +11,9 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
 
+# Render keep-alive server
+from aiohttp import web
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -23,6 +26,7 @@ from telegram.ext import (
 
 # APScheduler for scheduling reminders
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
 
 # ===============================================================
 # Logging
@@ -1174,6 +1178,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
