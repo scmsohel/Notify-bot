@@ -1,14 +1,25 @@
-# bot.py — Final Clean Version (Webhook + Polling Fallback + Ping Server)
-# ----------------------------------------------------------------------
+# bot.py — Webhook-ready Notify Bot (merged, cleaned)
+# -------------------------------------------------------------------
+# Uses python-telegram-bot v21.6 (async), APScheduler, aiohttp only for optional ping
+# If WEBHOOK_URL env set -> webhook mode; otherwise polling.
+# Set TZ env if needed (default: Asia/Dhaka)
+# -------------------------------------------------------------------
 
 import asyncio
 import os
 import logging
 import sqlite3
+import json
+import base64
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
-from aiohttp import web
+
+# optional import for timezone support
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -22,48 +33,49 @@ from telegram.ext import (
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# timezone
-try:
-    from zoneinfo import ZoneInfo
-except:
-    ZoneInfo = None
-
-# ---------------------------------------------------------
+# ===============================================================
 # Logging
-# ---------------------------------------------------------
+# ===============================================================
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.ERROR
 )
 
-# ---------------------------------------------------------
+# ===============================================================
 # Env
-# ---------------------------------------------------------
+# ===============================================================
 load_dotenv()
-BOT_TOKEN      = os.getenv("BOT_TOKEN")
-FORCED_CHANNEL = os.getenv("FORCED_CHANNEL")
-ADMIN_ID       = int(os.getenv("ADMIN_ID") or 0)
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "").strip()
-DB_PATH        = os.getenv("DB_PATH", "bot.db")
-TZ             = os.getenv("TZ", "Asia/Dhaka")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+FORCED_CHANNEL = os.getenv("FORCED_CHANNEL")  # e.g. @mychannel
+ADMIN_ID = int(os.getenv("ADMIN_ID") or 0)
 
-# timezone load
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()  # e.g. https://yourapp.onrender.com
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GITHUB_USER = os.getenv("GITHUB_USER")
+GITHUB_REPO = os.getenv("GITHUB_REPO")
+BACKUP_FILE = os.getenv("BACKUP_FILE", "backup.json")
+DB_PATH = os.getenv("DB_PATH", "bot.db")
+
+# TIMEZONE (default Asia/Dhaka). Use IANA names like "Asia/Dhaka"
+TZ = os.getenv("TZ", "Asia/Dhaka")
 _tzinfo = None
 if ZoneInfo:
     try:
         _tzinfo = ZoneInfo(TZ)
-    except:
-        logging.error("Invalid TZ, using system timezone.")
+    except Exception:
+        logging.error("Invalid TZ '%s', falling back to system timezone", TZ)
+        _tzinfo = None
 
-# ---------------------------------------------------------
+# ===============================================================
 # Admin helper
-# ---------------------------------------------------------
-def is_admin(uid):
+# ===============================================================
+def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
 
-# ---------------------------------------------------------
-# SQLite Init
-# ---------------------------------------------------------
+# ===============================================================
+# SQLite DB init
+# ===============================================================
 conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
@@ -94,68 +106,68 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
     job_id TEXT
 )
 """)
+
 conn.commit()
 
-# ---------------------------------------------------------
-# Languages
-# ---------------------------------------------------------
+# ===============================================================
+# Language texts + translator helper
+# ===============================================================
 LANG = {
     "bn": {
-        "force_join_text": "🚫 বট ব্যবহার করতে হলে আমাদের চ্যানেলে Join করুন।",
+        "force_join_text": "🚫 বট ব্যবহার করতে হলে আমাদের চ্যানেলে Join করুন।\n👇 নিচের বোতাম ব্যবহার করুন:",
         "select_lang_first": "🔰 প্রথমে আপনার ভাষা নির্বাচন করুন (/start)।",
         "choose_type": "🕹 রিমাইন্ডার টাইপ নির্বাচন করুন:",
-        "enter_min_hour": "উদাহরণ: `2m`, `1h`",
-        "wrong_format": "⚠️ ভুল ফরম্যাট। উদাহরণ: 5m / 1h",
+        "enter_min_hour": "⏱ *Minutes/Hours Selected*\nউদাহরণ: `2m`, `10m`, `1h`",
+        "wrong_format": "⚠️ ভুল ফরম্যাট। উদাহরণ: 2m / 1h",
         "enter_message": "✍ এখন Reminder-এর মেসেজ লিখুন:",
-        "date_prompt": "📅 তারিখ লিখুন (15/11/25)",
-        "time_prompt": "⏱ সময় লিখুন (10.15 PM)",
+        "date_prompt": "📅 তারিখ লিখুন (Format: 15/11/25)",
+        "time_prompt": "⏱ সময় লিখুন (Format: 10.15 PM)",
         "enter_message_date": "✍ রিমাইন্ডারের মেসেজ লিখুন:",
         "start_ready": "✔ এখন আপনি বট ব্যবহার করতে পারবেন।",
-        "daily_single_time_prompt": "⏱ প্রতিদিন একটি সময় (10.00 AM)",
-        "daily_multi_time_prompt": "⏱ একাধিক সময় (প্রতিটি নতুন লাইনে)",
+        "daily_single_time_prompt": "⏱ প্রতিদিন কোন একটি সময় চান?\nউদাহরণ: 10.00 AM",
+        "daily_multi_time_prompt": "⏱ প্রতিদিন কোন কোন সময় চান?\nপ্রতিটি টাইম নতুন লাইনে লিখুন:\nউদাহরণ:\n10.00 AM\n01.30 PM",
         "wrong_time_format": "⚠️ সময় ফরম্যাট ভুল। উদাহরণ: 10.20 PM",
         "enter_message_daily": "✍ Daily Reminder-এর মেসেজ লিখুন:"
     },
-
     "en": {
-        "force_join_text": "🚫 Please join our channel first.",
-        "select_lang_first": "🔰 Select language first (/start).",
+        "force_join_text": "🚫 Please join our channel to use this bot.\n👇 Use the buttons below:",
+        "select_lang_first": "🔰 Please select your language first (/start).",
         "choose_type": "🕹 Choose reminder type:",
-        "enter_min_hour": "Example: `2m`, `1h`",
-        "wrong_format": "⚠️ Wrong format. Example: 5m / 1h",
-        "enter_message": "✍ Enter reminder message:",
-        "date_prompt": "📅 Enter date (15/11/25)",
-        "time_prompt": "⏱ Enter time (10.15 PM)",
+        "enter_min_hour": "⏱ *Minutes/Hours Selected*\nExamples: `2m`, `10m`, `1h`",
+        "wrong_format": "⚠️ Wrong format. Example: 2m / 1h",
+        "enter_message": "✍ Now type the reminder message:",
+        "date_prompt": "📅 Enter date (Format: 15/11/25)",
+        "time_prompt": "⏱ Enter time (Format: 10.15 PM)",
         "enter_message_date": "✍ Enter reminder message:",
-        "start_ready": "✔ You can use the bot now.",
-        "daily_single_time_prompt": "⏱ One time daily (10.00 AM)",
-        "daily_multi_time_prompt": "⏱ Multiple times (each new line)",
-        "wrong_time_format": "⚠️ Wrong time format.",
+        "start_ready": "✔ You're now ready to use the bot.",
+        "daily_single_time_prompt": "⏱ Enter the daily time:\nExample: 10.00 AM",
+        "daily_multi_time_prompt": "⏱ Enter multiple times (each on new line):",
+        "wrong_time_format": "⚠️ Wrong time format. Example: 10.20 PM",
         "enter_message_daily": "✍ Enter daily reminder message:"
     }
 }
 
 def t(uid, key):
-    lang = get_lang(uid) or "bn"
-    return LANG.get(lang, LANG["bn"]).get(key, key)
+    lang = get_lang(uid)
+    if not lang:
+        lang = "bn"
+    return LANG.get(lang, LANG["bn"]).get(key, f"{{Missing:{key}}}")
 
-# ---------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------
+# ===============================================================
+# DB helper functions (simple)
+# ===============================================================
 def save_lang(uid, lang):
     cursor.execute("INSERT OR REPLACE INTO users (user_id, lang) VALUES (?,?)", (uid, lang))
     conn.commit()
 
 def get_lang(uid):
     cursor.execute("SELECT lang FROM users WHERE user_id=?", (uid,))
-    row = cursor.fetchone()
-    return row[0] if row else None
+    d = cursor.fetchone()
+    return d[0] if d else None
 
 def save_reminder(uid, msg, stype, tval, rep):
-    cursor.execute(
-        "INSERT INTO reminders (user_id, message, schedule_type, time_value, repeat) VALUES (?,?,?,?,?)",
-        (uid, msg, stype, tval, rep)
-    )
+    cursor.execute("INSERT INTO reminders (user_id, message, schedule_type, time_value, repeat) VALUES (?,?,?,?,?)",
+                   (uid, msg, stype, tval, rep))
     conn.commit()
     return cursor.lastrowid
 
@@ -169,7 +181,7 @@ def add_job_map(rem_id, job_id):
 
 def get_jobs(rem_id):
     cursor.execute("SELECT job_id FROM scheduled_jobs WHERE reminder_id=?", (rem_id,))
-    return [r[0] for r in cursor.fetchall()]
+    return [i[0] for i in cursor.fetchall()]
 
 def remove_mapping(rem_id):
     cursor.execute("DELETE FROM scheduled_jobs WHERE reminder_id=?", (rem_id,))
@@ -179,315 +191,318 @@ def get_user_reminders(uid):
     cursor.execute("SELECT id,message,schedule_type,time_value,repeat,status FROM reminders WHERE user_id=?", (uid,))
     return cursor.fetchall()
 
-# ---------------------------------------------------------
-# Scheduler + Reload Jobs
-# ---------------------------------------------------------
+# ===============================================================
+# GitHub backup helpers (kept safe/simple)
+# ===============================================================
+GITHUB_API_HEADERS = None
+if GITHUB_TOKEN:
+    GITHUB_API_HEADERS = {"Authorization": f"token {GITHUB_TOKEN}", "User-Agent": "notify-bot"}
+
+def github_get_file():
+    if not GITHUB_TOKEN or not GITHUB_USER or not GITHUB_REPO:
+        return None, None
+    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{BACKUP_FILE}"
+    try:
+        resp = requests.get(url, headers=GITHUB_API_HEADERS, timeout=15)
+        if resp.status_code == 200:
+            j = resp.json()
+            content = base64.b64decode(j["content"]).decode()
+            sha = j.get("sha")
+            return content, sha
+    except Exception as e:
+        logging.error("github_get_file error: %s", e)
+    return None, None
+
+def github_put_file(content_str, sha=None):
+    if not GITHUB_TOKEN or not GITHUB_USER or not GITHUB_REPO:
+        return False, "missing github config"
+    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{BACKUP_FILE}"
+    payload = {
+        "message": f"backup: update {BACKUP_FILE} by bot",
+        "content": base64.b64encode(content_str.encode()).decode()
+    }
+    if sha:
+        payload["sha"] = sha
+    try:
+        resp = requests.put(url, headers=GITHUB_API_HEADERS, json=payload, timeout=20)
+        return (resp.status_code in (200,201)), resp.text
+    except Exception as e:
+        logging.error("github_put_file error: %s", e)
+        return False, str(e)
+
+_backup_lock = asyncio.Lock()
+_last_backup_ts = 0
+_MIN_BACKUP_INTERVAL = 5
+
+async def save_backup_async():
+    global _last_backup_ts
+    async with _backup_lock:
+        now_ts = int(datetime.now().timestamp())
+        if now_ts - _last_backup_ts < _MIN_BACKUP_INTERVAL:
+            return
+        _last_backup_ts = now_ts
+
+        def build_backup():
+            local_conn = sqlite3.connect(DB_PATH)
+            local_cur = local_conn.cursor()
+            out = {"users": [], "reminders": [], "scheduled_jobs": []}
+            try:
+                local_cur.execute("SELECT user_id, lang FROM users")
+                for u in local_cur.fetchall():
+                    out["users"].append({"user_id": u[0], "lang": u[1]})
+                local_cur.execute("SELECT id, user_id, message, schedule_type, time_value, repeat, status FROM reminders")
+                for r in local_cur.fetchall():
+                    out["reminders"].append({
+                        "id": r[0],
+                        "user_id": r[1],
+                        "message": r[2],
+                        "schedule_type": r[3],
+                        "time_value": r[4],
+                        "repeat": r[5],
+                        "status": r[6]
+                    })
+                local_cur.execute("SELECT reminder_id, job_id FROM scheduled_jobs")
+                for s in local_cur.fetchall():
+                    out["scheduled_jobs"].append({"reminder_id": s[0], "job_id": s[1]})
+                return json.dumps(out, ensure_ascii=False, indent=2)
+            finally:
+                local_conn.close()
+
+        try:
+            content_str = await asyncio.to_thread(build_backup)
+        except Exception as e:
+            logging.error("save_backup_async build failed: %s", e)
+            return
+
+        if not (GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO):
+            return
+
+        try:
+            content, sha = await asyncio.to_thread(github_get_file)
+            success, resp = await asyncio.to_thread(github_put_file, content_str, sha)
+            if not success:
+                logging.error("GitHub backup failed: %s", resp)
+        except Exception as e:
+            logging.error("save_backup_async upload failed: %s", e)
+
+# ===============================================================
+# Scheduler: use tzinfo if available
+# ===============================================================
 scheduler = AsyncIOScheduler(timezone=_tzinfo) if _tzinfo else AsyncIOScheduler()
 scheduler.start()
 
-GLOBAL_BOT = None
+GLOBAL_BOT = None  # fallback for scheduled jobs
 
-async def send_reminder(user_id, message, context=None, rem_id=None):
+async def send_reminder(user_id, message, context=None, rem_id: int = None):
     bot = None
-
-    if context and hasattr(context, "bot"):
+    if context is not None and hasattr(context, "bot"):
         bot = context.bot
-    elif context and context.__class__.__name__ == "Bot":
+    elif context is not None and context.__class__.__name__ == "Bot":
         bot = context
-    elif GLOBAL_BOT:
+    elif GLOBAL_BOT is not None:
         bot = GLOBAL_BOT
     else:
-        logging.error("No bot instance for reminder.")
+        logging.error("No bot available to send reminder")
         return
 
     try:
         await bot.send_message(chat_id=user_id, text=f"⏰ Reminder:\n{message}")
     except Exception as e:
-        logging.error(e)
+        logging.error("Reminder send error: %s", e)
 
     if rem_id:
-        set_completed(rem_id)
-        remove_mapping(rem_id)
+        try:
+            set_completed(rem_id)
+            remove_mapping(rem_id)
+        except Exception as e:
+            logging.error("Mark completed error: %s", e)
 
-def reload_scheduled_jobs(app=None):
-    cursor.execute(
-        "SELECT id,user_id,message,schedule_type,time_value,repeat FROM reminders WHERE status='active'"
-    )
-    rows = cursor.fetchall()
-
-    for rem_id, uid, msg, stype, tval, rep in rows:
-
-        # MIN/HOUR
-        if stype == "min_hour":
-            try:
-                seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-                run_time = (datetime.now(tz=_tzinfo) + timedelta(seconds=seconds)) if _tzinfo else (datetime.now() + timedelta(seconds=seconds))
-
-                job = scheduler.add_job(
-                    send_reminder,
-                    trigger="date",
-                    run_date=run_time,
-                    kwargs={"user_id": uid, "message": msg, "rem_id": rem_id}
-                )
-                add_job_map(rem_id, job.id)
-            except Exception as e:
-                logging.error(e)
-
-        # DATE
-        elif stype == "date":
-            try:
-                dt_naive = datetime.strptime(tval, "%d/%m/%y %I.%M %p")
-                dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
-
-                if dt > (datetime.now(tz=_tzinfo) if _tzinfo else datetime.now()):
-                    job = scheduler.add_job(
-                        send_reminder,
-                        trigger="date",
-                        run_date=dt,
-                        kwargs={"user_id": uid, "message": msg, "rem_id": rem_id}
-                    )
-                    add_job_map(rem_id, job.id)
-            except Exception as e:
-                logging.error(e)
-
-        # DAILY
-        elif stype == "daily":
-            try:
-                times = tval.split(";")
-                for T in times:
-                    dt_obj = datetime.strptime(T, "%I.%M %p")
-                    job = scheduler.add_job(
-                        send_reminder,
-                        trigger="cron",
-                        hour=dt_obj.hour,
-                        minute=dt_obj.minute,
-                        timezone=_tzinfo,
-                        kwargs={"user_id": uid, "message": msg, "rem_id": None}
-                    )
-                    add_job_map(rem_id, job.id)
-            except Exception as e:
-                logging.error(e)
-# ===========================
-# PART 2/3 — Forced Join, Start, Set Reminder, Callback Handler
-# ===========================
-
-# ---------------------------
-# Forced Join Check
-# ---------------------------
+# ===============================================================
+# Forced-join, menus, handlers (same flow as original)
+# ===============================================================
 async def check_join_status(user_id, context):
     if not FORCED_CHANNEL:
         return True
     try:
-        m = await context.bot.get_chat_member(FORCED_CHANNEL, user_id)
-        return m.status in ["member", "administrator", "creator"]
-    except:
+        member = await context.bot.get_chat_member(FORCED_CHANNEL, user_id)
+        return member.status in ["member", "administrator", "creator"]
+    except Exception:
         return False
 
 async def send_force_join_message(update: Update, context):
     user_id = update.effective_user.id
-
     btn = [
         [
             InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
             InlineKeyboardButton("✔ Verify", callback_data="verify_join")
         ]
     ]
-
     msg = update.message or (update.callback_query.message if update.callback_query else None)
-    if msg:
-        await msg.reply_text(
-            t(user_id, "force_join_text"),
-            reply_markup=InlineKeyboardMarkup(btn),
-            parse_mode="Markdown"
-        )
+    if not msg:
+        return
+    await msg.reply_text(
+        t(user_id, "force_join_text"),
+        reply_markup=InlineKeyboardMarkup(btn),
+        parse_mode="Markdown"
+    )
 
-# ---------------------------
-# Language Menu
-# ---------------------------
 async def send_language_menu(update: Update, context):
     msg = update.message or (update.callback_query.message if update.callback_query else None)
-
     btn = [
         [
             InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn"),
             InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
         ]
     ]
-
     if msg:
         await msg.reply_text("🌐 Select your language:", reply_markup=InlineKeyboardMarkup(btn))
 
-# ---------------------------
 # /start
-# ---------------------------
-async def start(update: Update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not await check_join_status(user_id, context):
         return await send_force_join_message(update, context)
-
     lang = get_lang(user_id)
-
-    # New user → ask language
     if not lang:
         return await send_language_menu(update, context)
-
-    # Already has language → show menu
-    txt = "আপনার বর্তমান ভাষা: বাংলা 🇧🇩\nপরিবর্তন করতে চান?" if lang == "bn" else \
-          "Current language: English 🇬🇧\nDo you want to change?"
-
+    text = ("আপনার বর্তমান ভাষা: বাংলা 🇧🇩\nআপনি কি পরিবর্তন করতে চান?" if lang == "bn"
+            else "Your current language is English 🇬🇧\nDo you want to change it?")
     btn = [
         [InlineKeyboardButton("🌐 Change Language", callback_data="change_lang")],
         [InlineKeyboardButton("➡️ Continue", callback_data="go_ahead")]
     ]
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btn))
 
-    await update.message.reply_text(txt, reply_markup=InlineKeyboardMarkup(btn))
-
-# ---------------------------
 # /set_reminder
-# ---------------------------
-async def set_reminder(update: Update, context):
+async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-
     if not await check_join_status(user_id, context):
         return await send_force_join_message(update, context)
-
     if not get_lang(user_id):
         return await update.message.reply_text(t(user_id, "select_lang_first"))
-
     btn = [
         [InlineKeyboardButton("⏱ Minutes / Hours", callback_data="rem_min_hour")],
         [InlineKeyboardButton("📅 Date", callback_data="rem_date")],
-        [InlineKeyboardButton("🔁 Daily", callback_data="rem_daily")],
+        [InlineKeyboardButton("🔁 Daily", callback_data="rem_daily")]
     ]
+    await update.message.reply_text(t(user_id, "choose_type"), reply_markup=InlineKeyboardMarkup(btn))
 
-    await update.message.reply_text(
-        t(user_id, "choose_type"),
-        reply_markup=InlineKeyboardMarkup(btn)
-    )
-
-# ---------------------------
-# /notify_user (ADMIN ONLY)
-# ---------------------------
-async def notify_user(update: Update, context):
-    if not is_admin(update.effective_user.id):
+# admin notify_user
+async def notify_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
         return await update.message.reply_text("❌ You are not allowed.")
-
-    await update.message.reply_text(
-        "🔔 কাকে Notify করতে চান?\nUser ID বা @username দিন:"
-    )
+    await update.message.reply_text("🔔 কাকে Notify করতে চান?\nUser ID দিন অথবা @username লিখুন:")
     context.user_data["mode"] = "notify_select_user"
 
-# ---------------------------
-# Callback Handler
-# ---------------------------
-async def callback_handler(update: Update, context):
+# callback handler
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user_id = q.from_user.id
-    data = q.data
-
     try:
         await q.answer()
     except:
         pass
 
-    # -------- VERIFY JOIN --------
-    if data == "verify_join":
+    if q.data == "verify_join":
         if not await check_join_status(user_id, context):
-            btn = [[
-                InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
-                InlineKeyboardButton("✔ Verify", callback_data="verify_join")
-            ]]
+            btn = [
+                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
+                 InlineKeyboardButton("✔ Verify", callback_data="verify_join")]
+            ]
             return await q.edit_message_text("⚠️ You have not joined yet!", reply_markup=InlineKeyboardMarkup(btn))
+        return await q.edit_message_text("✔ Verified! Now send /start")
 
-        return await q.edit_message_text("✔ Verified! Send /start again.")
-
-    # -------- LANGUAGE --------
-    if data == "change_lang":
+    if q.data == "change_lang":
         return await send_language_menu(update, context)
 
-    if data == "go_ahead":
+    if q.data == "go_ahead":
         return await q.edit_message_text(t(user_id, "start_ready"))
 
-    if data == "lang_bn":
+    if q.data == "lang_bn":
         save_lang(user_id, "bn")
-        return await q.edit_message_text("🇧🇩 বাংলা সেট হয়েছে ✔\n/start দিন")
+        return await q.edit_message_text("🇧🇩 বাংলা সেট হয়েছে ✔\n/start দিন")
 
-    if data == "lang_en":
+    if q.data == "lang_en":
         save_lang(user_id, "en")
         return await q.edit_message_text("🇬🇧 English set ✔\nUse /start")
 
-    # -------- REMINDER TYPE --------
-    if data == "rem_min_hour":
+    if q.data == "rem_min_hour":
         context.user_data["mode"] = "min_hour"
         return await q.edit_message_text(t(user_id, "enter_min_hour"), parse_mode="Markdown")
 
-    if data == "rem_date":
+    if q.data == "rem_date":
         context.user_data["mode"] = "date_select"
         return await q.edit_message_text(t(user_id, "date_prompt"))
 
-    if data == "rem_daily":
+    if q.data == "rem_daily":
         btn = [
             [InlineKeyboardButton("🕛 Single Time", callback_data="daily_single")],
             [InlineKeyboardButton("🕒 Multiple Time", callback_data="daily_multi")]
         ]
         return await q.edit_message_text("🔁 Daily Reminder:", reply_markup=InlineKeyboardMarkup(btn))
 
-    # -------- DAILY options --------
-    if data == "daily_single":
+    if q.data == "daily_single":
         context.user_data["mode"] = "daily_single_time"
         return await q.edit_message_text(t(user_id, "daily_single_time_prompt"))
 
-    if data == "daily_multi":
+    if q.data == "daily_multi":
         context.user_data["mode"] = "daily_multi_time"
         return await q.edit_message_text(t(user_id, "daily_multi_time_prompt"))
 
-    # -------- REPEAT options --------
-    if data == "repeat_yes":
+    if q.data == "repeat_yes":
         context.user_data["mode"] = "repeat_count"
         return await q.edit_message_text("🔁 কয়বার Repeat করতে চান?\nউদাহরণ: 2 / 3 / 5")
 
-    if data == "repeat_no":
-        msg  = context.user_data.get("msg")
+    if q.data == "repeat_no":
+        target_id = context.user_data.get("notify_target", user_id)
+        msg = context.user_data.get("msg")
         tval = context.user_data.get("time")
-        target = context.user_data.get("notify_target", user_id)
-
         if not msg or not tval:
-            return await q.edit_message_text("⚠️ Invalid state. Try again.")
-
-        rem_id = save_reminder(target, msg, "min_hour", tval, 0)
-
+            return await q.edit_message_text("⚠️ Invalid state. Please set reminder again.")
+        rem_id = save_reminder(target_id, msg, "min_hour", tval, 0)
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-        run_time = (datetime.now(tz=_tzinfo) + timedelta(seconds=seconds)) if _tzinfo else (datetime.now() + timedelta(seconds=seconds))
-
+        run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds) if _tzinfo else datetime.now() + timedelta(seconds=seconds)
         job = scheduler.add_job(
             send_reminder,
             trigger="date",
             run_date=run_time,
-            kwargs={"user_id": target, "message": msg, "context": context, "rem_id": rem_id}
+            kwargs={"user_id": target_id, "message": msg, "context": context, "rem_id": rem_id}
         )
-
-        add_job_map(rem_id, job.id)
+        try:
+            add_job_map(rem_id, job.id)
+        except Exception as e:
+            logging.error("Job mapping error: %s", e)
         context.user_data.clear()
-
         return await q.edit_message_text(
-            f"✅ Reminder Set!\n📝 {msg}\n⏱ {tval}\n🔁 No repeat"
+            f"✅ Reminder Successfully Set!\n"
+            f"📝 Message: {msg}\n"
+            f"⏱ Time: {tval}\n"
+            f"🔁 Repeat: No\n"
+            f"📌 Your reminder is now active."
         )
-# ===========================
-# PART 3/3 — Text Handler, Show/Delete, MAIN()
-# ===========================
 
-# TEXT HANDLER
-async def text_handler(update: Update, context):
+# text handler (flows)
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip()
+    text = (update.message.text or "").strip()
 
-    # ---------------- ADMIN Notify STEP-1 ----------------
     if context.user_data.get("mode") == "notify_select_user":
-        target = text.replace("@", "")
-        context.user_data["notify_target"] = target
+        raw = text.strip()
+        target_id = None
+        if raw.startswith("@"):
+            username = raw[1:]
+            try:
+                chat = await context.bot.get_chat(username)
+                target_id = chat.id
+            except:
+                return await update.message.reply_text("❌ User not found বা username ভুল।")
+        else:
+            if not raw.isdigit():
+                return await update.message.reply_text("❌ সঠিক numeric ID দিন বা @username দিন।")
+            target_id = int(raw)
+        context.user_data["notify_target"] = target_id
         context.user_data["mode"] = "notify_type"
-
         btn = [
             [InlineKeyboardButton("⏱ Minutes/Hours", callback_data="rem_min_hour")],
             [InlineKeyboardButton("📅 Date", callback_data="rem_date")],
@@ -495,305 +510,345 @@ async def text_handler(update: Update, context):
         ]
         return await update.message.reply_text("রিমাইন্ডার টাইপ নির্বাচন করুন:", reply_markup=InlineKeyboardMarkup(btn))
 
-    # ---------------- MIN/HOUR STEP-1 (time) ----------------
     if context.user_data.get("mode") == "min_hour" and "time" not in context.user_data:
         if not (text.endswith("m") or text.endswith("h")):
             return await update.message.reply_text(t(user_id, "wrong_format"))
-
         context.user_data["time"] = text
         context.user_data["mode"] = "min_hour_msg"
         return await update.message.reply_text(t(user_id, "enter_message"))
 
-    # ---------------- MIN/HOUR STEP-2 (msg) ----------------
     if context.user_data.get("mode") == "min_hour_msg":
         context.user_data["msg"] = text
+        btn = [
+            [
+                InlineKeyboardButton("✔ YES", callback_data="repeat_yes"),
+                InlineKeyboardButton("✖ NO", callback_data="repeat_no")
+            ]
+        ]
+        return await update.message.reply_text("🔁 আপনি কি Repeat করতে চান?", reply_markup=InlineKeyboardMarkup(btn))
 
-        btn = [[
-            InlineKeyboardButton("✔ YES", callback_data="repeat_yes"),
-            InlineKeyboardButton("✖ NO", callback_data="repeat_no")
-        ]]
-
-        return await update.message.reply_text(
-            "🔁 আপনি কি Repeat করতে চান?",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
-
-    # ---------------- MIN/HOUR STEP-3 (repeat count) ----------------
     if context.user_data.get("mode") == "repeat_count":
         if not text.isdigit():
-            return await update.message.reply_text("⚠️ শুধু সংখ্যা লিখুন (যেমন 2 / 5)")
-
+            return await update.message.reply_text("⚠️ শুধু সংখ্যা লিখুন (যেমন: 2 / 5)")
         repeat_count = int(text)
-        msg   = context.user_data["msg"]
-        tval  = context.user_data["time"]
+        msg = context.user_data.get("msg")
+        tval = context.user_data.get("time")
         target = context.user_data.get("notify_target", user_id)
-
         rem_id = save_reminder(target, msg, "min_hour", tval, repeat_count)
-
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-
         for i in range(repeat_count):
-            run_time = (datetime.now(tz=_tzinfo) + timedelta(seconds=seconds*(i+1))) if _tzinfo \
-                       else (datetime.now() + timedelta(seconds=seconds*(i+1)))
-
+            run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds * (i + 1)) if _tzinfo else datetime.now() + timedelta(seconds=seconds * (i + 1))
             job = scheduler.add_job(
                 send_reminder,
                 trigger="date",
                 run_date=run_time,
                 kwargs={"user_id": target, "message": msg, "context": context, "rem_id": rem_id}
             )
-
             add_job_map(rem_id, job.id)
-
         context.user_data.clear()
-
         return await update.message.reply_text(
-            f"✅ Reminder Set!\n📝 {msg}\n⏱ {tval}\n🔁 {repeat_count} times"
+            f"✅ Reminder Successfully Set!\n"
+            f"📝 Message: {msg}\n"
+            f"⏱ Time: {tval}\n"
+            f"🔁 Repeat: {repeat_count} times\n"
+            f"📌 Your reminder is now active."
         )
 
-    # ---------------- DATE STEP-1 (date) ----------------
     if context.user_data.get("mode") == "date_select":
         try:
             datetime.strptime(text, "%d/%m/%y")
         except:
-            return await update.message.reply_text("⚠️ তারিখ ভুল (Format: 15/11/25)")
-
+            return await update.message.reply_text("⚠️ তারিখ ফরম্যাট ভুল (15/11/25)")
         context.user_data["date"] = text
         context.user_data["mode"] = "date_time"
         return await update.message.reply_text(t(user_id, "time_prompt"))
 
-    # ---------------- DATE STEP-2 (time) ----------------
     if context.user_data.get("mode") == "date_time":
         try:
             datetime.strptime(text, "%I.%M %p")
         except:
-            return await update.message.reply_text("⚠️ সময় ভুল (Format: 10.15 PM)")
-
+            return await update.message.reply_text("⚠️ সময় ফরম্যাট ভুল (10.15 PM)")
         context.user_data["time"] = text
         context.user_data["mode"] = "date_message"
         return await update.message.reply_text(t(user_id, "enter_message_date"))
 
-    # ---------------- DATE STEP-3 (message) ----------------
     if context.user_data.get("mode") == "date_message":
         msg = text
         date_str = context.user_data["date"]
         time_str = context.user_data["time"]
         target = context.user_data.get("notify_target", user_id)
-
-        dt_naive = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%y %I.%M %p")
-        dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
-
+        try:
+            dt_naive = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%y %I.%M %p")
+            dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
+        except Exception as e:
+            logging.error("Date parse failed: %s", e)
+            return await update.message.reply_text("⚠️ Date/time parse failed.")
         rem_id = save_reminder(target, msg, "date", f"{date_str} {time_str}", 0)
-
         job = scheduler.add_job(
             send_reminder,
             trigger="date",
             run_date=dt,
             kwargs={"user_id": target, "message": msg, "context": context, "rem_id": rem_id}
         )
-
         add_job_map(rem_id, job.id)
         context.user_data.clear()
-
         return await update.message.reply_text(
-            f"✅ Reminder Created!\n📅 {date_str}\n⏱ {time_str}"
+            f"✅ Reminder Successfully Set!\n"
+            f"📝 Message: {msg}\n"
+            f"📅 Date: {date_str}\n"
+            f"⏱ Time: {time_str}\n"
+            f"🔁 Repeat: No\n"
+            f"📌 Your reminder is now active."
         )
 
-    # ---------------- DAILY SINGLE TIME ----------------
     if context.user_data.get("mode") == "daily_single_time":
         try:
             datetime.strptime(text, "%I.%M %p")
         except:
             return await update.message.reply_text(t(user_id, "wrong_time_format"))
-
         context.user_data["daily_times"] = [text]
         context.user_data["mode"] = "daily_msg"
         return await update.message.reply_text(t(user_id, "enter_message_daily"))
 
-    # ---------------- DAILY MULTI TIME ----------------
     if context.user_data.get("mode") == "daily_multi_time":
-        times = [i.strip() for i in text.split("\n") if i.strip()]
-
-        for tstr in times:
+        lines = [i.strip() for i in text.split("\n") if i.strip()]
+        valid = []
+        for line in lines:
             try:
-                datetime.strptime(tstr, "%I.%M %p")
+                datetime.strptime(line, "%I.%M %p")
+                valid.append(line)
             except:
                 return await update.message.reply_text(t(user_id, "wrong_time_format"))
-
-        context.user_data["daily_times"] = times
+        context.user_data["daily_times"] = valid
         context.user_data["mode"] = "daily_msg"
         return await update.message.reply_text(t(user_id, "enter_message_daily"))
 
-    # ---------------- DAILY FINAL STEP (msg) ----------------
     if context.user_data.get("mode") == "daily_msg":
         msg = text
         times = context.user_data["daily_times"]
         target = context.user_data.get("notify_target", user_id)
-
         rem_id = save_reminder(target, msg, "daily", ";".join(times), 0)
-
         for tstr in times:
-            dt = datetime.strptime(tstr, "%I.%M %p")
-            hour, minute = dt.hour, dt.minute
-
-            job = scheduler.add_job(
-                send_reminder,
-                trigger="cron",
-                hour=hour,
-                minute=minute,
-                timezone=_tzinfo,
-                kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
-            )
-
-            add_job_map(rem_id, job.id)
-
+            try:
+                dt_obj = datetime.strptime(tstr, "%I.%M %p")
+                hour, minute = dt_obj.hour, dt_obj.minute
+                if _tzinfo:
+                    job = scheduler.add_job(
+                        send_reminder,
+                        trigger="cron",
+                        hour=hour,
+                        minute=minute,
+                        timezone=_tzinfo,
+                        kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
+                    )
+                else:
+                    job = scheduler.add_job(
+                        send_reminder,
+                        trigger="cron",
+                        hour=hour,
+                        minute=minute,
+                        kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
+                    )
+                add_job_map(rem_id, job.id)
+            except Exception as e:
+                logging.error("Daily schedule error for %s: %s", tstr, e)
         context.user_data.clear()
-
         return await update.message.reply_text(
-            f"✅ Daily Reminder Added!\n⏱ {', '.join(times)}"
+            f"✅ Daily Reminder Set!\n"
+            f"📝 Message: {msg}\n"
+            f"⏱ Times: {', '.join(times)}\n"
+            f"🔁 Repeat: Daily\n"
+            f"📌 Your reminder is now active."
         )
 
-# ===============================================================
-# SHOW REMINDERS
-# ===============================================================
-async def show_reminder(update, context):
-    uid = update.effective_user.id
-    rows = get_user_reminders(uid)
+    return
 
-    active = [i for i in rows if i[5] == "active"]
-
+# show active reminders
+async def show_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    data = get_user_reminders(user_id)
+    active = [i for i in data if i[5] == "active"]
     if not active:
         return await update.message.reply_text("📭 কোনো Active Reminder নেই।")
-
-    txt = "📋 *Active Reminders:*\n\n"
+    text = "📋 *Active Reminders:*\n\n"
     for rid, msg, stype, tval, rep, status in active:
-        txt += f"🆔 ID: {rid}\n📝 {msg}\n"
-
+        text += f"🆔 ID: {rid}\n"
+        text += f"📝 Message: {msg}\n"
         if stype == "min_hour":
-            txt += f"⏱ {tval}\n🔁 {rep}\n\n"
+            text += f"⏱ Time: {tval}\n🔁 Repeat: {rep}\n"
         elif stype == "date":
             d = tval.split(" ")
-            txt += f"📅 {d[0]}\n⏱ {' '.join(d[1:])}\n\n"
+            text += f"📅 {d[0]}\n⏱ {' '.join(d[1:])}\n"
         else:
-            txt += f"⏱ {tval.replace(';', ', ')}\n🔁 Daily\n\n"
+            text += f"⏱ {tval.replace(';', ', ')}\n🔁 Daily\n"
+        text += f"\n\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
+# show completed
+async def show_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("""
+        SELECT id,message,schedule_type,time_value,repeat
+        FROM reminders
+        WHERE user_id=? AND status='completed'
+    """, (user_id,))
+    rows = cursor.fetchall()
+    if not rows:
+        return await update.message.reply_text("📦 No completed reminders.")
+    txt = "📦 *Completed Reminders:*\n\n"
+    for rid, msg, stype, tval, rep in rows:
+        txt += f"🆔 ID: {rid}\n📝 Message: {msg}\n⏱ {tval}\n🔁 Repeat: {rep}\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
-# ===============================================================
-# DELETE REMINDER
-# ===============================================================
-async def delete_reminder(update, context):
-    uid = update.effective_user.id
-    txt = update.message.text
+# clear completed
+async def clear_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    cursor.execute("DELETE FROM reminders WHERE user_id=? AND status='completed'", (user_id,))
+    conn.commit()
+    try:
+        asyncio.create_task(save_backup_async())
+    except:
+        pass
+    await update.message.reply_text("🧹 Completed reminders cleared!")
 
+# delete reminder
+async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    txt = update.message.text or ""
     try:
         rem_id = int(txt.replace("/delete_reminder_", ""))
     except:
         return await update.message.reply_text("❌ Invalid format.")
-
-    cursor.execute("SELECT id FROM reminders WHERE id=? AND user_id=?", (rem_id, uid))
+    cursor.execute("SELECT id FROM reminders WHERE id=? AND user_id=?", (rem_id, user_id))
     if not cursor.fetchone():
         return await update.message.reply_text("❌ Reminder not found.")
-
-    # Remove scheduled jobs
-    for jid in get_jobs(rem_id):
+    jobs = get_jobs(rem_id)
+    for jid in jobs:
         try:
             scheduler.remove_job(jid)
         except:
             pass
-
     remove_mapping(rem_id)
-
     cursor.execute("DELETE FROM reminders WHERE id=?", (rem_id,))
     conn.commit()
-
+    try:
+        asyncio.create_task(save_backup_async())
+    except:
+        pass
     await update.message.reply_text("🗑 Reminder deleted!")
 
-# ===============================================================
-# HELP
-# ===============================================================
-async def help_command(update, context):
-    t = (
-        "🧠 বট ব্যবহার করার নিয়ম:\n\n"
-        "/start – ভাষা নির্বাচন\n"
-        "/set_reminder – রিমাইন্ডার সেট\n"
-        "/show_reminder – Active Reminder\n"
-        "/show_completed – Completed List\n"
-        "/clear_completed – Completed ডিলিট\n"
-        "/delete_reminder_<id> – Reminder ডিলিট\n"
+# help
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = (
+        "🧠 *ব্যবহার করা খুব সহজ!*\n\n"
+        "• `/start` → ভাষা নির্বাচন\n"
+        "• `/set_reminder` → রিমাইন্ডার সেট\n"
+        "• `/show_reminder` → সক্রিয় রিমাইন্ডার দেখুন\n"
+        "• `/show_completed` → সম্পন্ন রিমাইন্ডার তালিকা\n"
+        "• `/delete_reminder_<id>` → রিমাইন্ডার ডিলিট\n"
     )
-    await update.message.reply_text(t, parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ===============================================================
-# MAIN (Webhook + Polling + Ping Server)
-# ===============================================================
+# reload scheduled jobs from DB
+def reload_scheduled_jobs(app=None):
+    cursor.execute("""
+        SELECT id, user_id, message, schedule_type, time_value, repeat
+        FROM reminders
+        WHERE status='active'
+    """)
+    rows = cursor.fetchall()
+    for rem_id, uid, msg, stype, tval, rep in rows:
+        try:
+            if stype == "min_hour":
+                try:
+                    seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
+                except Exception:
+                    logging.error("Invalid min_hour stored value: %s", tval)
+                    continue
+                run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds) if _tzinfo else datetime.now() + timedelta(seconds=seconds)
+                job = scheduler.add_job(send_reminder, trigger="date", run_date=run_time,
+                    kwargs={"user_id": uid, "message": msg, "rem_id": rem_id})
+                add_job_map(rem_id, job.id)
+
+            elif stype == "date":
+                try:
+                    dt_naive = datetime.strptime(tval, "%d/%m/%y %I.%M %p")
+                    dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
+                    if dt > (datetime.now(tz=_tzinfo) if _tzinfo else datetime.now()):
+                        job = scheduler.add_job(send_reminder, trigger="date", run_date=dt,
+                            kwargs={"user_id": uid, "message": msg, "rem_id": rem_id})
+                        add_job_map(rem_id, job.id)
+                except Exception as e:
+                    logging.error("Reload DATE parse error for %s: %s", tval, e)
+
+            elif stype == "daily":
+                times = tval.split(";")
+                for tstr in times:
+                    try:
+                        dt_obj = datetime.strptime(tstr, "%I.%M %p")
+                        hour, minute = dt_obj.hour, dt_obj.minute
+                        if _tzinfo:
+                            job = scheduler.add_job(send_reminder, trigger="cron", hour=hour, minute=minute, timezone=_tzinfo,
+                                kwargs={"user_id": uid, "message": msg, "rem_id": None})
+                        else:
+                            job = scheduler.add_job(send_reminder, trigger="cron", hour=hour, minute=minute,
+                                kwargs={"user_id": uid, "message": msg, "rem_id": None})
+                        add_job_map(rem_id, job.id)
+                    except Exception as e:
+                        logging.error("Reload DAILY parse error for %s: %s", tstr, e)
+
+        except Exception as e:
+            logging.error(f"Reload job error (rem_id={rem_id}): {e}")
+
+# MAIN — webhook mode (with polling fallback)
 def main():
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN missing.")
+        print("ERROR: BOT_TOKEN is not set in environment.")
         return
 
     port = int(os.getenv("PORT", "8000"))
     webhook_path = f"webhook/{BOT_TOKEN}"
     webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}" if WEBHOOK_URL else ""
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).build()
 
+    # set global bot for scheduler fallback
     global GLOBAL_BOT
-    GLOBAL_BOT = app.bot
+    GLOBAL_BOT = application.bot
 
-    # ---- Register Handlers ----
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set_reminder", set_reminder))
-    app.add_handler(CommandHandler("show_reminder", show_reminder))
-    app.add_handler(CommandHandler("show_completed", show_completed))
-    app.add_handler(CommandHandler("clear_completed", clear_completed))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("notify_user", notify_user))
+    # register handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("set_reminder", set_reminder))
+    application.add_handler(CommandHandler("show_reminder", show_reminder))
+    application.add_handler(CommandHandler("show_completed", show_completed))
+    application.add_handler(CommandHandler("clear_completed", clear_completed))
+    application.add_handler(CommandHandler("notify_user", notify_user))
+    application.add_handler(CommandHandler("help", help_command))
 
-    app.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+    application.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
+    application.add_handler(CallbackQueryHandler(callback_handler))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Reload previous jobs
-    reload_scheduled_jobs(app)
+    # reload db jobs
+    reload_scheduled_jobs(application)
 
-    # ---- Ping Server ----
-    async def ping_route(request):
-        return web.Response(text="ok")
+    # Note: do NOT start a separate aiohttp server binding the same PORT as run_webhook.
+    # If you need an HTTP /ping healthcheck, see notes below.
 
-    async def start_ping(port):
-        papp = web.Application()
-        papp.router.add_get("/ping", ping_route)
-
-        runner = web.AppRunner(papp)
-        await runner.setup()
-
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        print(f"[PING] Serving at http://0.0.0.0:{port}/ping")
-
-    try:
-        asyncio.get_event_loop().create_task(start_ping(port))
-    except:
-        pass
-
-    # ---- Webhook Mode ----
     if WEBHOOK_URL:
-        print(f"Webhook on port {port}: /{webhook_path}")
+        print(f"Starting webhook on port {port} with path /{webhook_path} and url {webhook_url}")
         try:
-            app.run_webhook(
-                listen="0.0.0.0",
-                port=port,
-                url_path=webhook_path,
-                webhook_url=webhook_url
-            )
+            application.run_webhook(listen="0.0.0.0",
+                                    port=port,
+                                    url_path=webhook_path,
+                                    webhook_url=webhook_url)
             return
         except Exception as e:
-            logging.error(f"Webhook failed: {e} — falling back to polling")
+            logging.error("run_webhook failed: %s — falling back to polling", e)
 
-    # ---- Polling Mode ----
-    print("Polling started...")
-    app.run_polling()
+    print("Starting polling (WEBHOOK skipped or failed).")
+    application.run_polling()
 
 if __name__ == "__main__":
     main()
