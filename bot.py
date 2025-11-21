@@ -14,6 +14,7 @@ import base64
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import requests
+from aiohttp import web
 
 # optional import for timezone support
 try:
@@ -833,22 +834,36 @@ def main():
     # reload db jobs
     reload_scheduled_jobs(application)
 
-    # Note: do NOT start a separate aiohttp server binding the same PORT as run_webhook.
-    # If you need an HTTP /ping healthcheck, see notes below.
-
+    # WEBHOOK MODE
     if WEBHOOK_URL:
-        print(f"Starting webhook on port {port} with path /{webhook_path} and url {webhook_url}")
+        print(f"Starting webhook on port {port} with path /{webhook_path}")
+        print(f"Webhook URL = {webhook_url}")
+
+        # Add /ping route
         try:
-            application.run_webhook(listen="0.0.0.0",
-                                    port=port,
-                                    url_path=webhook_path,
-                                    webhook_url=webhook_url)
+            application.webhook_app.router.add_get("/ping", lambda r: web.Response(text="ok"))
+            print("[PING] /ping route added OK")
+        except Exception as e:
+            print(f"[PING ERROR] {e}")
+
+        # Start webhook
+        try:
+            application.run_webhook(
+                listen="0.0.0.0",
+                port=port,
+                url_path=webhook_path,
+                webhook_url=webhook_url
+            )
             return
         except Exception as e:
-            logging.error("run_webhook failed: %s — falling back to polling", e)
+            logging.error(f"run_webhook failed: {e} — falling back to polling")
 
+    # POLLING fallback
     print("Starting polling (WEBHOOK skipped or failed).")
     application.run_polling()
 
+
 if __name__ == "__main__":
     main()
+
+
