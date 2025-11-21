@@ -1108,56 +1108,73 @@ def reload_scheduled_jobs(app):
 
         except Exception as e:
             logging.error("Reload job error: %s", e)
-# ============================
-# FIXED MAIN for Render + PTB v21
-# ============================
 
-async def main_async():
+
+# ===============================================================
+# FINAL RENDER SAFE MAIN (NO LOOP ERROR, NO EXIT)
+# ===============================================================
+def main():
     global GLOBAL_BOT
 
-    # --- Build Telegram App ---
-    app = Application.builder().token(BOT_TOKEN).build()
-    GLOBAL_BOT = app.bot
+    # -------- build telegram bot ----------
+    application = Application.builder().token(BOT_TOKEN).build()
+    GLOBAL_BOT = application.bot
 
-    # --- Start ping server (Render port) ---
-    port = int(os.getenv("PORT", "8000"))
-    asyncio.create_task(run_ping_server(host="0.0.0.0", port=port))
+    async def start_bot():
+        """Run Telegram bot polling in background"""
+        # load github backup
+        if GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO:
+            try:
+                await load_backup_from_github()
+            except Exception as e:
+                logging.error(f"Backup load error: {e}")
 
-    # --- Load GitHub backup (if enabled) ---
-    if GITHUB_TOKEN and GITHUB_USER and GITHUB_REPO:
-        try:
-            await load_backup_from_github()
-        except Exception as e:
-            logging.error(f"Backup load error: {e}")
+        # handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("set_reminder", set_reminder))
+        application.add_handler(CommandHandler("show_reminder", show_reminder))
+        application.add_handler(CommandHandler("show_completed", show_completed))
+        application.add_handler(CommandHandler("clear_completed", clear_completed))
+        application.add_handler(CommandHandler("notify_user", notify_user))
+        application.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
+        application.add_handler(CallbackQueryHandler(callback_handler))
+        application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+        application.add_handler(CommandHandler("help", help_command))
 
-    # --- Telegram Handlers ---
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("set_reminder", set_reminder))
-    app.add_handler(CommandHandler("show_reminder", show_reminder))
-    app.add_handler(CommandHandler("show_completed", show_completed))
-    app.add_handler(CommandHandler("clear_completed", clear_completed))
-    app.add_handler(CommandHandler("notify_user", notify_user))
+        reload_scheduled_jobs(application)
 
-    app.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
-    app.add_handler(CommandHandler("help", help_command))
+        print("Telegram polling started ✔")
 
-    # --- Reload scheduled jobs ---
-    reload_scheduled_jobs(app)
+        # start bot polling
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
 
-    print("Reminder Bot Running...")
+    async def start_web():
+        """Start aiohttp server for Render keepalive"""
+        port = int(os.getenv("PORT", "8000"))
+        app = web.Application()
+        app.router.add_get("/ping", handle_ping)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", port)
+        await site.start()
+        print(f"Ping server running on port {port} ✔")
 
-    # --- Start Bot Polling (async) ---
-    await app.run_polling()
+    async def runner():
+        # run both concurrently
+        await asyncio.gather(
+            start_bot(),
+            start_web()
+        )
 
-
-def main():
-    asyncio.run(main_async())
+    # start asyncio event loop
+    asyncio.run(runner())
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
