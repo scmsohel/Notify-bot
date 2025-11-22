@@ -819,23 +819,26 @@ def main():
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # ---------------------------------------------
-    # PTB FIX → Initialize first, then add routes
-    # ---------------------------------------------
+    # -----------------------------
+    # INIT application first
+    # -----------------------------
     loop = asyncio.get_event_loop()
     loop.run_until_complete(application.initialize())
 
-    # Now /ping works always
+    # -----------------------------
+    # ADD /ping route correctly
+    # (PTB v21: web_app created after initialize())
+    # -----------------------------
     try:
         aio_app = application.web_app
         aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
-        print("[PING] /ping route added after initialize ✔")
+        print("[PING] /ping added ✔")
     except Exception as e:
         print("[PING ERROR]", e)
 
-    # ---------------------------------------------
-    # Load handlers
-    # ---------------------------------------------
+    # -----------------------------
+    # ADD handlers
+    # -----------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
@@ -849,16 +852,20 @@ def main():
 
     reload_scheduled_jobs(application)
 
-    # ---------------------------------------------
+    # -----------------------------
     # WEBHOOK MODE
-    # ---------------------------------------------
+    # -----------------------------
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port}")
         print(f"Webhook URL = {webhook_url}")
 
-        loop.run_until_complete(application.start())
+        # start webhook service
+        loop.run_until_complete(
+            application.start()
+        )
 
-        try:
+        # start aiohttp server (non-blocking)
+        loop.run_until_complete(
             application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
@@ -866,26 +873,17 @@ def main():
                 webhook_url=webhook_url,
                 allowed_updates=Update.ALL_TYPES
             )
-            return
-        except Exception as e:
-            logging.error(f"run_webhook failed → {e}")
+        )
 
-    # ---------------------------------------------
+        loop.run_forever()
+        return
+
+    # -----------------------------
     # POLLING fallback
-    # ---------------------------------------------
-    print("Starting polling mode...")
+    # -----------------------------
+    print("Starting polling...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
-
-
-
-
