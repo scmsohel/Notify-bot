@@ -846,72 +846,76 @@ class CustomWebhookServer:
 
 def main():
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN not set.")
+        print("ERROR: BOT_TOKEN is not set in environment.")
         return
 
     port = int(os.getenv("PORT", "8000"))
     webhook_path = f"webhook/{BOT_TOKEN}"
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
+    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}" if WEBHOOK_URL else ""
 
-    # -----------------------------------------
-    # Build Application
-    # -----------------------------------------
+    # Build application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # GLOBAL BOT
+    # GLOBAL bot
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # -----------------------------------------
-    # Add all handlers
-    # -----------------------------------------
+    # -----------------------------
+    # ALWAYS enable /ping (Webhook or Polling — both)
+    # -----------------------------
+    try:
+        aio_app = application.web_app
+        aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
+        print("[PING] /ping route added globally ✔")
+    except Exception as e:
+        print("[PING ERROR]", e)
+
+    # -----------------------------
+    # Handlers
+    # -----------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
     application.add_handler(CommandHandler("show_completed", show_completed))
     application.add_handler(CommandHandler("clear_completed", clear_completed))
-    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("notify_user", notify_user))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
+    # Reload scheduled jobs
     reload_scheduled_jobs(application)
 
-    # -----------------------------------------
-    # WEBHOOK MODE
-    # -----------------------------------------
+    # -----------------------------
+    # WEBHOOK MODE (if URL provided)
+    # -----------------------------
     if WEBHOOK_URL:
-        server = CustomWebhookServer(application)
+        print(f"Starting webhook on port {port}")
+        print(f"Webhook URL = {webhook_url}")
 
-        async def run_all():
-            await application.initialize()
-
-            # set telegram webhook
-            await application.bot.set_webhook(webhook_url)
-
-            # run webhook server with ping route
-            await server.run(
+        try:
+            application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
-                path=webhook_path,
-                url=webhook_url
+                url_path=webhook_path,
+                webhook_url=webhook_url,
+                allowed_updates=Update.ALL_TYPES
             )
+            return
+        except Exception as e:
+            logging.error(f"run_webhook failed → {e}")
 
-        loop = asyncio.get_event_loop()
-        loop.run_until_complete(run_all())
-        loop.run_forever()
-        return
-
-    # -----------------------------------------
+    # -----------------------------
     # POLLING fallback
-    # -----------------------------------------
-    print("Running polling mode...")
+    # -----------------------------
+    print("Starting polling mode...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
 
 
 
