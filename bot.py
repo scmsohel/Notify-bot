@@ -819,19 +819,23 @@ def main():
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # -----------------------------
-    # ALWAYS enable /ping (Webhook or Polling — both)
-    # -----------------------------
+    # ---------------------------------------------
+    # PTB FIX → Initialize first, then add routes
+    # ---------------------------------------------
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(application.initialize())
+
+    # Now /ping works always
     try:
         aio_app = application.web_app
         aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
-        print("[PING] /ping route added globally ✔")
+        print("[PING] /ping route added after initialize ✔")
     except Exception as e:
         print("[PING ERROR]", e)
 
-    # -----------------------------
-    # Handlers
-    # -----------------------------
+    # ---------------------------------------------
+    # Load handlers
+    # ---------------------------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
@@ -843,15 +847,16 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Reload scheduled jobs
     reload_scheduled_jobs(application)
 
-    # -----------------------------
-    # WEBHOOK MODE (if URL provided)
-    # -----------------------------
+    # ---------------------------------------------
+    # WEBHOOK MODE
+    # ---------------------------------------------
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port}")
         print(f"Webhook URL = {webhook_url}")
+
+        loop.run_until_complete(application.start())
 
         try:
             application.run_webhook(
@@ -865,15 +870,17 @@ def main():
         except Exception as e:
             logging.error(f"run_webhook failed → {e}")
 
-    # -----------------------------
+    # ---------------------------------------------
     # POLLING fallback
-    # -----------------------------
+    # ---------------------------------------------
     print("Starting polling mode...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
