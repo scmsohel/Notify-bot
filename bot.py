@@ -819,7 +819,19 @@ def main():
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
+    # -----------------------------
+    # ALWAYS enable /ping (Webhook or Polling — both)
+    # -----------------------------
+    try:
+        aio_app = application.web_app
+        aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
+        print("[PING] /ping route added globally ✔")
+    except Exception as e:
+        print("[PING ERROR]", e)
+
+    # -----------------------------
     # Handlers
+    # -----------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
@@ -831,25 +843,16 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Reload jobs
+    # Reload scheduled jobs
     reload_scheduled_jobs(application)
 
     # -----------------------------
-    # WEBHOOK MODE
+    # WEBHOOK MODE (if URL provided)
     # -----------------------------
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port}")
         print(f"Webhook URL = {webhook_url}")
 
-        # ⭐ Correct ping route (official safe API)
-        try:
-            aio_app = application.web_app
-            aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
-            print("[PING] /ping route added successfully")
-        except Exception as e:
-            print(f"[PING ERROR] Could not add /ping → {e}")
-
-        # ⭐ Start webhook with allowed updates
         try:
             application.run_webhook(
                 listen="0.0.0.0",
@@ -873,8 +876,6 @@ if __name__ == "__main__":
     main()
 
 
-if __name__ == "__main__":
-    main()
 
 
 
