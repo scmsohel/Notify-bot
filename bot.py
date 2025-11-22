@@ -803,91 +803,115 @@ def reload_scheduled_jobs(app=None):
         except Exception as e:
             logging.error(f"Reload job error (rem_id={rem_id}): {e}")
 
+from aiohttp import web
+import asyncio
+from telegram.ext import Application, AIORunner
+
+
+class CustomWebhookServer:
+    """
+    Fully PTB v21 compatible custom aiohttp webhook server,
+    allows adding /ping route safely.
+    """
+    def __init__(self, application):
+        self.application = application
+        self.runner = AIORunner(application)
+
+        # our own aiohttp app
+        self.web_app = web.Application()
+
+        # add ping route
+        self.web_app.router.add_get("/ping", self.handle_ping)
+
+    async def handle_ping(self, request):
+        return web.Response(text="ok")
+
+    async def run(self, listen, port, path, url):
+        # start telegram application internal server
+        await self.runner.initialize()
+        await self.runner.start()
+
+        # mount PTB aiohttp app under /<path>
+        # example: /webhook/<TOKEN>
+        self.web_app.add_subapp(f"/{path}", self.application.web_app)
+
+        # now run our standalone aiohttp site
+        runner = web.AppRunner(self.web_app)
+        await runner.setup()
+        site = web.TCPSite(runner, listen, port)
+        await site.start()
+
+        print(f"[Webhook Active] {url}")
+
+
 def main():
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN is not set in environment.")
+        print("ERROR: BOT_TOKEN not set.")
         return
 
     port = int(os.getenv("PORT", "8000"))
     webhook_path = f"webhook/{BOT_TOKEN}"
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}" if WEBHOOK_URL else ""
+    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}"
 
-    # Build application
+    # -----------------------------------------
+    # Build Application
+    # -----------------------------------------
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # GLOBAL bot
+    # GLOBAL BOT
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # -----------------------------
-    # INIT application first
-    # -----------------------------
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(application.initialize())
-
-    # -----------------------------
-    # ADD /ping route correctly
-    # (PTB v21: web_app created after initialize())
-    # -----------------------------
-    try:
-        aio_app = application.web_app
-        aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
-        print("[PING] /ping added ✔")
-    except Exception as e:
-        print("[PING ERROR]", e)
-
-    # -----------------------------
-    # ADD handlers
-    # -----------------------------
+    # -----------------------------------------
+    # Add all handlers
+    # -----------------------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
     application.add_handler(CommandHandler("show_completed", show_completed))
     application.add_handler(CommandHandler("clear_completed", clear_completed))
-    application.add_handler(CommandHandler("notify_user", notify_user))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("notify_user", notify_user))
     application.add_handler(MessageHandler(filters.Regex(r"^/delete_reminder_\d+$"), delete_reminder))
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
     reload_scheduled_jobs(application)
 
-    # -----------------------------
+    # -----------------------------------------
     # WEBHOOK MODE
-    # -----------------------------
+    # -----------------------------------------
     if WEBHOOK_URL:
-        print(f"Starting webhook on port {port}")
-        print(f"Webhook URL = {webhook_url}")
+        server = CustomWebhookServer(application)
 
-        # start webhook service
-        loop.run_until_complete(
-            application.start()
-        )
+        async def run_all():
+            await application.initialize()
 
-        # start aiohttp server (non-blocking)
-        loop.run_until_complete(
-            application.run_webhook(
+            # set telegram webhook
+            await application.bot.set_webhook(webhook_url)
+
+            # run webhook server with ping route
+            await server.run(
                 listen="0.0.0.0",
                 port=port,
-                url_path=webhook_path,
-                webhook_url=webhook_url,
-                allowed_updates=Update.ALL_TYPES
+                path=webhook_path,
+                url=webhook_url
             )
-        )
 
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(run_all())
         loop.run_forever()
         return
 
-    # -----------------------------
+    # -----------------------------------------
     # POLLING fallback
-    # -----------------------------
-    print("Starting polling...")
+    # -----------------------------------------
+    print("Running polling mode...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
 
-if __name__ == "__main__":
-    main()
+
 
