@@ -109,7 +109,6 @@ CREATE TABLE IF NOT EXISTS scheduled_jobs (
 """)
 
 conn.commit()
-
 # ===============================================================
 # Language texts + translator helper
 # ===============================================================
@@ -154,11 +153,15 @@ def t(uid, key):
         lang = "bn"
     return LANG.get(lang, LANG["bn"]).get(key, f"{{Missing:{key}}}")
 
+
 # ===============================================================
-# DB helper functions (simple)
+# DB helper functions
 # ===============================================================
 def save_lang(uid, lang):
-    cursor.execute("INSERT OR REPLACE INTO users (user_id, lang) VALUES (?,?)", (uid, lang))
+    cursor.execute(
+        "INSERT OR REPLACE INTO users (user_id, lang) VALUES (?,?)",
+        (uid, lang)
+    )
     conn.commit()
 
 def get_lang(uid):
@@ -167,8 +170,10 @@ def get_lang(uid):
     return d[0] if d else None
 
 def save_reminder(uid, msg, stype, tval, rep):
-    cursor.execute("INSERT INTO reminders (user_id, message, schedule_type, time_value, repeat) VALUES (?,?,?,?,?)",
-                   (uid, msg, stype, tval, rep))
+    cursor.execute("""
+        INSERT INTO reminders (user_id, message, schedule_type, time_value, repeat)
+        VALUES (?,?,?,?,?)
+    """, (uid, msg, stype, tval, rep))
     conn.commit()
     return cursor.lastrowid
 
@@ -177,7 +182,10 @@ def set_completed(rem_id):
     conn.commit()
 
 def add_job_map(rem_id, job_id):
-    cursor.execute("INSERT INTO scheduled_jobs(reminder_id, job_id) VALUES (?,?)", (rem_id, job_id))
+    cursor.execute(
+        "INSERT INTO scheduled_jobs(reminder_id, job_id) VALUES (?,?)",
+        (rem_id, job_id)
+    )
     conn.commit()
 
 def get_jobs(rem_id):
@@ -189,15 +197,23 @@ def remove_mapping(rem_id):
     conn.commit()
 
 def get_user_reminders(uid):
-    cursor.execute("SELECT id,message,schedule_type,time_value,repeat,status FROM reminders WHERE user_id=?", (uid,))
+    cursor.execute("""
+        SELECT id,message,schedule_type,time_value,repeat,status
+        FROM reminders
+        WHERE user_id=?
+    """, (uid,))
     return cursor.fetchall()
 
+
 # ===============================================================
-# GitHub backup helpers (kept safe/simple)
+# GitHub backup helpers (safe/simple)
 # ===============================================================
 GITHUB_API_HEADERS = None
 if GITHUB_TOKEN:
-    GITHUB_API_HEADERS = {"Authorization": f"token {GITHUB_TOKEN}", "User-Agent": "notify-bot"}
+    GITHUB_API_HEADERS = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "User-Agent": "notify-bot"
+    }
 
 def github_get_file():
     if not GITHUB_TOKEN or not GITHUB_USER or not GITHUB_REPO:
@@ -226,14 +242,16 @@ def github_put_file(content_str, sha=None):
         payload["sha"] = sha
     try:
         resp = requests.put(url, headers=GITHUB_API_HEADERS, json=payload, timeout=20)
-        return (resp.status_code in (200,201)), resp.text
+        return (resp.status_code in (200, 201)), resp.text
     except Exception as e:
         logging.error("github_put_file error: %s", e)
         return False, str(e)
 
+
 _backup_lock = asyncio.Lock()
 _last_backup_ts = 0
 _MIN_BACKUP_INTERVAL = 5
+
 
 async def save_backup_async():
     global _last_backup_ts
@@ -247,11 +265,16 @@ async def save_backup_async():
             local_conn = sqlite3.connect(DB_PATH)
             local_cur = local_conn.cursor()
             out = {"users": [], "reminders": [], "scheduled_jobs": []}
+
             try:
                 local_cur.execute("SELECT user_id, lang FROM users")
                 for u in local_cur.fetchall():
                     out["users"].append({"user_id": u[0], "lang": u[1]})
-                local_cur.execute("SELECT id, user_id, message, schedule_type, time_value, repeat, status FROM reminders")
+
+                local_cur.execute("""
+                    SELECT id, user_id, message, schedule_type,
+                           time_value, repeat, status FROM reminders
+                """)
                 for r in local_cur.fetchall():
                     out["reminders"].append({
                         "id": r[0],
@@ -262,10 +285,16 @@ async def save_backup_async():
                         "repeat": r[5],
                         "status": r[6]
                     })
+
                 local_cur.execute("SELECT reminder_id, job_id FROM scheduled_jobs")
                 for s in local_cur.fetchall():
-                    out["scheduled_jobs"].append({"reminder_id": s[0], "job_id": s[1]})
+                    out["scheduled_jobs"].append({
+                        "reminder_id": s[0],
+                        "job_id": s[1]
+                    })
+
                 return json.dumps(out, ensure_ascii=False, indent=2)
+
             finally:
                 local_conn.close()
 
@@ -285,7 +314,6 @@ async def save_backup_async():
                 logging.error("GitHub backup failed: %s", resp)
         except Exception as e:
             logging.error("save_backup_async upload failed: %s", e)
-
 # ===============================================================
 # Scheduler: use tzinfo if available
 # ===============================================================
@@ -294,8 +322,10 @@ scheduler.start()
 
 GLOBAL_BOT = None  # fallback for scheduled jobs
 
+
 async def send_reminder(user_id, message, context=None, rem_id: int = None):
     bot = None
+
     if context is not None and hasattr(context, "bot"):
         bot = context.bot
     elif context is not None and context.__class__.__name__ == "Bot":
@@ -318,8 +348,9 @@ async def send_reminder(user_id, message, context=None, rem_id: int = None):
         except Exception as e:
             logging.error("Mark completed error: %s", e)
 
+
 # ===============================================================
-# Forced-join, menus, handlers (same flow as original)
+# Forced-join, menus, handlers
 # ===============================================================
 async def check_join_status(user_id, context):
     if not FORCED_CHANNEL:
@@ -330,90 +361,141 @@ async def check_join_status(user_id, context):
     except Exception:
         return False
 
+
 async def send_force_join_message(update: Update, context):
     user_id = update.effective_user.id
+
     btn = [
         [
-            InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
+            InlineKeyboardButton("📢 Join Channel",
+                                 url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
             InlineKeyboardButton("✔ Verify", callback_data="verify_join")
         ]
     ]
+
     msg = update.message or (update.callback_query.message if update.callback_query else None)
     if not msg:
         return
+
     await msg.reply_text(
         t(user_id, "force_join_text"),
         reply_markup=InlineKeyboardMarkup(btn),
         parse_mode="Markdown"
     )
 
+
 async def send_language_menu(update: Update, context):
     msg = update.message or (update.callback_query.message if update.callback_query else None)
+
     btn = [
         [
             InlineKeyboardButton("🇧🇩 বাংলা", callback_data="lang_bn"),
             InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")
         ]
     ]
+
     if msg:
         await msg.reply_text("🌐 Select your language:", reply_markup=InlineKeyboardMarkup(btn))
 
+
+# ===============================================================
 # /start
+# ===============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     if not await check_join_status(user_id, context):
         return await send_force_join_message(update, context)
+
     lang = get_lang(user_id)
     if not lang:
         return await send_language_menu(update, context)
-    text = ("আপনার বর্তমান ভাষা: বাংলা 🇧🇩\nআপনি কি পরিবর্তন করতে চান?" if lang == "bn"
-            else "Your current language is English 🇬🇧\nDo you want to change it?")
+
+    text = (
+        "আপনার বর্তমান ভাষা: বাংলা 🇧🇩\nআপনি কি পরিবর্তন করতে চান?"
+        if lang == "bn"
+        else "Your current language is English 🇬🇧\nDo you want to change it?"
+    )
+
     btn = [
         [InlineKeyboardButton("🌐 Change Language", callback_data="change_lang")],
         [InlineKeyboardButton("➡️ Continue", callback_data="go_ahead")]
     ]
+
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(btn))
 
+
+# ===============================================================
 # /set_reminder
+# ===============================================================
 async def set_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     if not await check_join_status(user_id, context):
         return await send_force_join_message(update, context)
+
     if not get_lang(user_id):
         return await update.message.reply_text(t(user_id, "select_lang_first"))
+
     btn = [
         [InlineKeyboardButton("⏱ Minutes / Hours", callback_data="rem_min_hour")],
         [InlineKeyboardButton("📅 Date", callback_data="rem_date")],
         [InlineKeyboardButton("🔁 Daily", callback_data="rem_daily")]
     ]
-    await update.message.reply_text(t(user_id, "choose_type"), reply_markup=InlineKeyboardMarkup(btn))
 
+    await update.message.reply_text(
+        t(user_id, "choose_type"),
+        reply_markup=InlineKeyboardMarkup(btn)
+    )
+# ===============================================================
 # admin notify_user
+# ===============================================================
 async def notify_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+
     if not is_admin(user_id):
         return await update.message.reply_text("❌ You are not allowed.")
-    await update.message.reply_text("🔔 কাকে Notify করতে চান?\nUser ID দিন অথবা @username লিখুন:")
+
+    await update.message.reply_text(
+        "🔔 কাকে Notify করতে চান?\nUser ID দিন অথবা @username লিখুন:"
+    )
     context.user_data["mode"] = "notify_select_user"
 
+
+# ===============================================================
 # callback handler
+# ===============================================================
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     user_id = q.from_user.id
+
     try:
         await q.answer()
     except:
         pass
 
+    # --------------------------------------------------------------------
+    # Verify join
+    # --------------------------------------------------------------------
     if q.data == "verify_join":
         if not await check_join_status(user_id, context):
             btn = [
-                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
-                 InlineKeyboardButton("✔ Verify", callback_data="verify_join")]
+                [
+                    InlineKeyboardButton("📢 Join Channel",
+                                         url=f"https://t.me/{FORCED_CHANNEL.replace('@','')}"),
+                    InlineKeyboardButton("✔ Verify", callback_data="verify_join")
+                ]
             ]
-            return await q.edit_message_text("⚠️ You have not joined yet!", reply_markup=InlineKeyboardMarkup(btn))
+            return await q.edit_message_text(
+                "⚠️ You have not joined yet!",
+                reply_markup=InlineKeyboardMarkup(btn)
+            )
+
         return await q.edit_message_text("✔ Verified! Now send /start")
 
+    # --------------------------------------------------------------------
+    # Language selection
+    # --------------------------------------------------------------------
     if q.data == "change_lang":
         return await send_language_menu(update, context)
 
@@ -428,6 +510,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_lang(user_id, "en")
         return await q.edit_message_text("🇬🇧 English set ✔\nUse /start")
 
+    # --------------------------------------------------------------------
+    # Reminder Type Selection
+    # --------------------------------------------------------------------
     if q.data == "rem_min_hour":
         context.user_data["mode"] = "min_hour"
         return await q.edit_message_text(t(user_id, "enter_min_hour"), parse_mode="Markdown")
@@ -443,6 +528,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         return await q.edit_message_text("🔁 Daily Reminder:", reply_markup=InlineKeyboardMarkup(btn))
 
+    # --------------------------------------------------------------------
+    # Daily single / multiple
+    # --------------------------------------------------------------------
     if q.data == "daily_single":
         context.user_data["mode"] = "daily_single_time"
         return await q.edit_message_text(t(user_id, "daily_single_time_prompt"))
@@ -451,6 +539,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["mode"] = "daily_multi_time"
         return await q.edit_message_text(t(user_id, "daily_multi_time_prompt"))
 
+    # --------------------------------------------------------------------
+    # YES/NO for Repeat (minutes/hours)
+    # --------------------------------------------------------------------
     if q.data == "repeat_yes":
         context.user_data["mode"] = "repeat_count"
         return await q.edit_message_text("🔁 কয়বার Repeat করতে চান?\nউদাহরণ: 2 / 3 / 5")
@@ -459,22 +550,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_id = context.user_data.get("notify_target", user_id)
         msg = context.user_data.get("msg")
         tval = context.user_data.get("time")
+
         if not msg or not tval:
             return await q.edit_message_text("⚠️ Invalid state. Please set reminder again.")
+
         rem_id = save_reminder(target_id, msg, "min_hour", tval, 0)
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
-        run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds) if _tzinfo else datetime.now() + timedelta(seconds=seconds)
+
+        run_time = (
+            datetime.now(tz=_tzinfo) + timedelta(seconds=seconds)
+            if _tzinfo else datetime.now() + timedelta(seconds=seconds)
+        )
+
         job = scheduler.add_job(
             send_reminder,
             trigger="date",
             run_date=run_time,
-            kwargs={"user_id": target_id, "message": msg, "context": context, "rem_id": rem_id}
+            kwargs={"user_id": target_id, "message": msg,
+                    "context": context, "rem_id": rem_id}
         )
+
         try:
             add_job_map(rem_id, job.id)
         except Exception as e:
             logging.error("Job mapping error: %s", e)
+
         context.user_data.clear()
+
         return await q.edit_message_text(
             f"✅ Reminder Successfully Set!\n"
             f"📝 Message: {msg}\n"
@@ -482,15 +584,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🔁 Repeat: No\n"
             f"📌 Your reminder is now active."
         )
-
+# ===============================================================
 # text handler (flows)
+# ===============================================================
 async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = (update.message.text or "").strip()
 
+    # --------------------------------------------------
+    # notify user -> select user
+    # --------------------------------------------------
     if context.user_data.get("mode") == "notify_select_user":
         raw = text.strip()
         target_id = None
+
         if raw.startswith("@"):
             username = raw[1:]
             try:
@@ -502,8 +609,10 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not raw.isdigit():
                 return await update.message.reply_text("❌ সঠিক numeric ID দিন বা @username দিন।")
             target_id = int(raw)
+
         context.user_data["notify_target"] = target_id
         context.user_data["mode"] = "notify_type"
+
         btn = [
             [InlineKeyboardButton("⏱ Minutes/Hours", callback_data="rem_min_hour")],
             [InlineKeyboardButton("📅 Date", callback_data="rem_date")],
@@ -511,42 +620,67 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         return await update.message.reply_text("রিমাইন্ডার টাইপ নির্বাচন করুন:", reply_markup=InlineKeyboardMarkup(btn))
 
+    # --------------------------------------------------
+    # min/hour -> select time
+    # --------------------------------------------------
     if context.user_data.get("mode") == "min_hour" and "time" not in context.user_data:
         if not (text.endswith("m") or text.endswith("h")):
             return await update.message.reply_text(t(user_id, "wrong_format"))
+
         context.user_data["time"] = text
         context.user_data["mode"] = "min_hour_msg"
+
         return await update.message.reply_text(t(user_id, "enter_message"))
 
+    # --------------------------------------------------
+    # min/hour -> message
+    # --------------------------------------------------
     if context.user_data.get("mode") == "min_hour_msg":
         context.user_data["msg"] = text
+
         btn = [
             [
                 InlineKeyboardButton("✔ YES", callback_data="repeat_yes"),
                 InlineKeyboardButton("✖ NO", callback_data="repeat_no")
             ]
         ]
-        return await update.message.reply_text("🔁 আপনি কি Repeat করতে চান?", reply_markup=InlineKeyboardMarkup(btn))
 
+        return await update.message.reply_text(
+            "🔁 আপনি কি Repeat করতে চান?",
+            reply_markup=InlineKeyboardMarkup(btn)
+        )
+
+    # --------------------------------------------------
+    # repeat count
+    # --------------------------------------------------
     if context.user_data.get("mode") == "repeat_count":
         if not text.isdigit():
             return await update.message.reply_text("⚠️ শুধু সংখ্যা লিখুন (যেমন: 2 / 5)")
+
         repeat_count = int(text)
         msg = context.user_data.get("msg")
         tval = context.user_data.get("time")
         target = context.user_data.get("notify_target", user_id)
+
         rem_id = save_reminder(target, msg, "min_hour", tval, repeat_count)
         seconds = int(tval[:-1]) * (60 if tval.endswith("m") else 3600)
+
         for i in range(repeat_count):
-            run_time = datetime.now(tz=_tzinfo) + timedelta(seconds=seconds * (i + 1)) if _tzinfo else datetime.now() + timedelta(seconds=seconds * (i + 1))
+            run_time = (
+                datetime.now(tz=_tzinfo) + timedelta(seconds=seconds * (i + 1))
+                if _tzinfo else datetime.now() + timedelta(seconds=seconds * (i + 1))
+            )
             job = scheduler.add_job(
                 send_reminder,
                 trigger="date",
                 run_date=run_time,
-                kwargs={"user_id": target, "message": msg, "context": context, "rem_id": rem_id}
+                kwargs={"user_id": target, "message": msg,
+                        "context": context, "rem_id": rem_id}
             )
             add_job_map(rem_id, job.id)
+
         context.user_data.clear()
+
         return await update.message.reply_text(
             f"✅ Reminder Successfully Set!\n"
             f"📝 Message: {msg}\n"
@@ -555,44 +689,65 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 Your reminder is now active."
         )
 
+    # --------------------------------------------------
+    # date select
+    # --------------------------------------------------
     if context.user_data.get("mode") == "date_select":
         try:
             datetime.strptime(text, "%d/%m/%y")
         except:
             return await update.message.reply_text("⚠️ তারিখ ফরম্যাট ভুল (15/11/25)")
+
         context.user_data["date"] = text
         context.user_data["mode"] = "date_time"
+
         return await update.message.reply_text(t(user_id, "time_prompt"))
 
+    # --------------------------------------------------
+    # date time select
+    # --------------------------------------------------
     if context.user_data.get("mode") == "date_time":
         try:
             datetime.strptime(text, "%I.%M %p")
         except:
             return await update.message.reply_text("⚠️ সময় ফরম্যাট ভুল (10.15 PM)")
+
         context.user_data["time"] = text
         context.user_data["mode"] = "date_message"
+
         return await update.message.reply_text(t(user_id, "enter_message_date"))
 
+    # --------------------------------------------------
+    # date -> final message
+    # --------------------------------------------------
     if context.user_data.get("mode") == "date_message":
         msg = text
         date_str = context.user_data["date"]
         time_str = context.user_data["time"]
         target = context.user_data.get("notify_target", user_id)
+
         try:
-            dt_naive = datetime.strptime(f"{date_str} {time_str}", "%d/%m/%y %I.%M %p")
+            dt_naive = datetime.strptime(
+                f"{date_str} {time_str}", "%d/%m/%y %I.%M %p"
+            )
             dt = dt_naive.replace(tzinfo=_tzinfo) if _tzinfo else dt_naive
         except Exception as e:
             logging.error("Date parse failed: %s", e)
             return await update.message.reply_text("⚠️ Date/time parse failed.")
+
         rem_id = save_reminder(target, msg, "date", f"{date_str} {time_str}", 0)
+
         job = scheduler.add_job(
             send_reminder,
             trigger="date",
             run_date=dt,
-            kwargs={"user_id": target, "message": msg, "context": context, "rem_id": rem_id}
+            kwargs={"user_id": target, "message": msg,
+                    "context": context, "rem_id": rem_id}
         )
+
         add_job_map(rem_id, job.id)
         context.user_data.clear()
+
         return await update.message.reply_text(
             f"✅ Reminder Successfully Set!\n"
             f"📝 Message: {msg}\n"
@@ -602,37 +757,54 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📌 Your reminder is now active."
         )
 
+    # --------------------------------------------------
+    # daily single-time
+    # --------------------------------------------------
     if context.user_data.get("mode") == "daily_single_time":
         try:
             datetime.strptime(text, "%I.%M %p")
         except:
             return await update.message.reply_text(t(user_id, "wrong_time_format"))
+
         context.user_data["daily_times"] = [text]
         context.user_data["mode"] = "daily_msg"
+
         return await update.message.reply_text(t(user_id, "enter_message_daily"))
 
+    # --------------------------------------------------
+    # daily multi-time
+    # --------------------------------------------------
     if context.user_data.get("mode") == "daily_multi_time":
         lines = [i.strip() for i in text.split("\n") if i.strip()]
         valid = []
+
         for line in lines:
             try:
                 datetime.strptime(line, "%I.%M %p")
                 valid.append(line)
             except:
                 return await update.message.reply_text(t(user_id, "wrong_time_format"))
+
         context.user_data["daily_times"] = valid
         context.user_data["mode"] = "daily_msg"
+
         return await update.message.reply_text(t(user_id, "enter_message_daily"))
 
+    # --------------------------------------------------
+    # daily final message
+    # --------------------------------------------------
     if context.user_data.get("mode") == "daily_msg":
         msg = text
         times = context.user_data["daily_times"]
         target = context.user_data.get("notify_target", user_id)
+
         rem_id = save_reminder(target, msg, "daily", ";".join(times), 0)
+
         for tstr in times:
             try:
                 dt_obj = datetime.strptime(tstr, "%I.%M %p")
                 hour, minute = dt_obj.hour, dt_obj.minute
+
                 if _tzinfo:
                     job = scheduler.add_job(
                         send_reminder,
@@ -650,10 +822,14 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         minute=minute,
                         kwargs={"user_id": target, "message": msg, "context": context, "rem_id": None}
                     )
+
                 add_job_map(rem_id, job.id)
+
             except Exception as e:
                 logging.error("Daily schedule error for %s: %s", tstr, e)
+
         context.user_data.clear()
+
         return await update.message.reply_text(
             f"✅ Daily Reminder Set!\n"
             f"📝 Message: {msg}\n"
@@ -663,8 +839,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     return
-
+# ===============================================================
 # show active reminders
+# ===============================================================
 async def show_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = get_user_reminders(user_id)
@@ -685,7 +862,10 @@ async def show_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += f"\n\n"
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
+# ===============================================================
 # show completed
+# ===============================================================
 async def show_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute("""
@@ -701,7 +881,10 @@ async def show_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         txt += f"🆔 ID: {rid}\n📝 Message: {msg}\n⏱ {tval}\n🔁 Repeat: {rep}\n\n"
     await update.message.reply_text(txt, parse_mode="Markdown")
 
+
+# ===============================================================
 # clear completed
+# ===============================================================
 async def clear_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     cursor.execute("DELETE FROM reminders WHERE user_id=? AND status='completed'", (user_id,))
@@ -712,7 +895,10 @@ async def clear_completed(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await update.message.reply_text("🧹 Completed reminders cleared!")
 
+
+# ===============================================================
 # delete reminder
+# ===============================================================
 async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     txt = update.message.text or ""
@@ -738,7 +924,10 @@ async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pass
     await update.message.reply_text("🗑 Reminder deleted!")
 
+
+# ===============================================================
 # help
+# ===============================================================
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     text = (
@@ -752,7 +941,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
+
+# ===============================================================
 # reload scheduled jobs from DB
+# ===============================================================
 def reload_scheduled_jobs(app=None):
     cursor.execute("""
         SELECT id, user_id, message, schedule_type, time_value, repeat
@@ -803,6 +995,7 @@ def reload_scheduled_jobs(app=None):
         except Exception as e:
             logging.error(f"Reload job error (rem_id={rem_id}): {e}")
 
+
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set in environment.")
@@ -819,19 +1012,7 @@ def main():
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
-    # -----------------------------
-    # ALWAYS enable /ping (Webhook or Polling — both)
-    # -----------------------------
-    try:
-        aio_app = application.web_app
-        aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
-        print("[PING] /ping route added globally ✔")
-    except Exception as e:
-        print("[PING ERROR]", e)
-
-    # -----------------------------
     # Handlers
-    # -----------------------------
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set_reminder", set_reminder))
     application.add_handler(CommandHandler("show_reminder", show_reminder))
@@ -843,16 +1024,25 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-    # Reload scheduled jobs
+    # Reload jobs
     reload_scheduled_jobs(application)
 
     # -----------------------------
-    # WEBHOOK MODE (if URL provided)
+    # WEBHOOK MODE
     # -----------------------------
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port}")
         print(f"Webhook URL = {webhook_url}")
 
+        # ⭐ Correct ping route (official safe API)
+        try:
+            aio_app = application.web_app
+            aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
+            print("[PING] /ping route added successfully")
+        except Exception as e:
+            print(f"[PING ERROR] Could not add /ping → {e}")
+
+        # ⭐ Start webhook with allowed updates
         try:
             application.run_webhook(
                 listen="0.0.0.0",
@@ -874,8 +1064,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
