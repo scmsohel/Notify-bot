@@ -803,7 +803,6 @@ def reload_scheduled_jobs(app=None):
         except Exception as e:
             logging.error(f"Reload job error (rem_id={rem_id}): {e}")
 
-# MAIN — webhook mode (with polling fallback)
 def main():
     if not BOT_TOKEN:
         print("ERROR: BOT_TOKEN is not set in environment.")
@@ -813,8 +812,10 @@ def main():
     webhook_path = f"webhook/{BOT_TOKEN}"
     webhook_url = f"{WEBHOOK_URL.rstrip('/')}/{webhook_path}" if WEBHOOK_URL else ""
 
+    # Build application
     application = Application.builder().token(BOT_TOKEN).build()
 
+    # GLOBAL bot
     global GLOBAL_BOT
     GLOBAL_BOT = application.bot
 
@@ -830,40 +831,51 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
+    # Reload jobs
     reload_scheduled_jobs(application)
 
+    # -----------------------------
     # WEBHOOK MODE
+    # -----------------------------
     if WEBHOOK_URL:
         print(f"Starting webhook on port {port}")
         print(f"Webhook URL = {webhook_url}")
 
-        # ⭐ Correct way to add /ping route
+        # ⭐ Correct ping route (official safe API)
         try:
-            aio_app = application._webhook_app     # <-- THE FIX
-            aio_app.router.add_get("/ping", lambda r: web.Response(text="ok"))
-            print("[PING] /ping route added")
+            aio_app = application.web_app
+            aio_app.router.add_get("/ping", lambda req: web.Response(text="ok"))
+            print("[PING] /ping route added successfully")
         except Exception as e:
-            print(f"[PING ERROR] {e}")
+            print(f"[PING ERROR] Could not add /ping → {e}")
 
+        # ⭐ Start webhook with allowed updates
         try:
             application.run_webhook(
                 listen="0.0.0.0",
                 port=port,
                 url_path=webhook_path,
-                webhook_url=webhook_url
+                webhook_url=webhook_url,
+                allowed_updates=Update.ALL_TYPES
             )
             return
         except Exception as e:
-            logging.error(f"run_webhook failed: {e}")
+            logging.error(f"run_webhook failed → {e}")
 
-    print("Starting polling (WEBHOOK skipped or failed).")
+    # -----------------------------
+    # POLLING fallback
+    # -----------------------------
+    print("Starting polling mode...")
     application.run_polling()
-
-
 
 
 if __name__ == "__main__":
     main()
+
+
+if __name__ == "__main__":
+    main()
+
 
 
 
